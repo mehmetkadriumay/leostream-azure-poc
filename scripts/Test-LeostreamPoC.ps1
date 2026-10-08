@@ -11,10 +11,10 @@
       Infrastructure
         * resource group, virtual network and the four subnets with the
           expected address prefixes
-        * NSGs attached, Gateway HTTPS allowed, Broker/desktop without a
-          public IP address
+        * NSGs attached, Gateway HTTPS allowed, Broker without a public IP
+          address
         * Broker and Gateway are distinct virtual machines
-        * all three VMs running
+        * both VMs running
         * Broker has a system-assigned managed identity with a role assignment
         * Azure Bastion present (when enabled)
 
@@ -22,7 +22,10 @@
         * Gateway TCP/443 reachable from the current machine
         * Broker HTTPS reachable from inside the VNet (via RunCommand on the
           Gateway)
-        * Leostream Agent service state on the Windows desktop
+
+      Desktops
+        * this PoC deploys none; any VM added to the Desktop subnet is
+          inventoried and checked for public IP exposure
 
 .PARAMETER SkipRemoteChecks
     Only perform Azure control-plane checks (no RunCommand invocations).
@@ -136,7 +139,6 @@ if ($gwNsg) {
 # --- virtual machines ---------------------------------------------------------
 $brokerSpec  = $config.VirtualMachines.Broker
 $gatewaySpec = $config.VirtualMachines.Gateway
-$winSpec     = $config.VirtualMachines.WindowsDesktop
 
 if ($brokerSpec.Name -ne $gatewaySpec.Name) {
     Add-Result -Area 'Architecture' -Check 'Broker and Gateway are separate VMs' -Status Pass -Detail "$($brokerSpec.Name) / $($gatewaySpec.Name)"
@@ -145,7 +147,7 @@ else {
     Add-Result -Area 'Architecture' -Check 'Broker and Gateway are separate VMs' -Status Fail
 }
 
-foreach ($spec in @($brokerSpec, $gatewaySpec, $winSpec)) {
+foreach ($spec in @($brokerSpec, $gatewaySpec)) {
     $vm = Get-AzVM -ResourceGroupName $rgName -Name $spec.Name -Status -ErrorAction SilentlyContinue
     if (-not $vm) {
         Add-Result -Area 'Compute' -Check "VM $($spec.Name)" -Status Fail -Detail 'not found'
@@ -255,26 +257,25 @@ if (-not $SkipRemoteChecks) {
         Add-Result -Area 'Service' -Check 'Broker HTTPS reachable from Gateway' -Status Skip -Detail $_.Exception.Message
     }
 
-    try {
-        $agentProbe = @'
-$svc = Get-Service -Name 'LeostreamAgent' -ErrorAction SilentlyContinue
-if ($svc) { Write-Output "AGENT_STATUS=$($svc.Status)" } else { Write-Output 'AGENT_STATUS=NotInstalled' }
-'@
-        $res = Invoke-AzVMRunCommand -ResourceGroupName $rgName -VMName $winSpec.Name `
-            -CommandId 'RunPowerShellScript' -ScriptString $agentProbe -ErrorAction Stop
-        $message = ($res.Value | ForEach-Object { $_.Message }) -join "`n"
-        if ($message -match 'AGENT_STATUS=Running') {
-            Add-Result -Area 'Service' -Check 'Leostream Agent running on the desktop' -Status Pass
-        }
-        elseif ($message -match 'AGENT_STATUS=NotInstalled') {
-            Add-Result -Area 'Service' -Check 'Leostream Agent running on the desktop' -Status Warn -Detail 'run Install-LeostreamAgent.ps1'
-        }
-        else {
-            Add-Result -Area 'Service' -Check 'Leostream Agent running on the desktop' -Status Warn -Detail $message.Trim()
-        }
+}
+
+# --- desktops -----------------------------------------------------------------
+# This PoC deploys no desktops. Report whatever has been added to the Desktop
+# subnet since deployment so the inventory is visible either way.
+$desktopSubnetName = $config.Network.Subnets.Desktop.Name
+$desktopNics = @(Get-AzNetworkInterface -ResourceGroupName $rgName -ErrorAction SilentlyContinue |
+    Where-Object { $_.IpConfigurations.Subnet.Id -match "/subnets/$desktopSubnetName$" })
+
+if ($desktopNics.Count -eq 0) {
+    Add-Result -Area 'Desktops' -Check 'Desktop inventory' -Status Skip -Detail 'no desktops deployed (expected for this PoC)'
+}
+else {
+    $exposed = @($desktopNics | Where-Object { $_.IpConfigurations.PublicIpAddress })
+    if ($exposed.Count -eq 0) {
+        Add-Result -Area 'Desktops' -Check 'Desktops have no public IP' -Status Pass -Detail "$($desktopNics.Count) found"
     }
-    catch {
-        Add-Result -Area 'Service' -Check 'Leostream Agent running on the desktop' -Status Skip -Detail $_.Exception.Message
+    else {
+        Add-Result -Area 'Desktops' -Check 'Desktops have no public IP' -Status Fail -Detail "$($exposed.Count) exposed"
     }
 }
 

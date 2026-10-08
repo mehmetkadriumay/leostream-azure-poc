@@ -3,10 +3,15 @@
 
 <#
 .SYNOPSIS
-    Installs the Leostream Agent on leo-win-01 (Windows 11) and registers it
-    with the Broker.
+    Installs the Leostream Agent on an existing Windows desktop VM and
+    registers it with the Broker.
 
 .DESCRIPTION
+    This PoC deploys no desktops, so there is no default target. Create a
+    Windows VM in the Desktop subnet (10.50.10.0/24) yourself - or let the
+    Broker provision one through its managed identity - then pass its name
+    with -VMName.
+
     Uses Invoke-AzVMRunCommand with CommandId 'RunPowerShellScript' so the
     desktop VM never needs a public IP address.
 
@@ -18,6 +23,9 @@
 
     No MSI files or licence material are stored in this repository.
 
+.PARAMETER VMName
+    Name of an existing Windows VM in the PoC resource group.
+
 .PARAMETER InstallerUri
     HTTPS URI of the Leostream Agent MSI.
 
@@ -25,7 +33,7 @@
     Broker private IP or DNS name. Defaults to poc.config.psd1.
 
 .EXAMPLE
-    ./Install-LeostreamAgent.ps1 -InstallerUri 'https://<your-portal>/LeostreamAgent.msi'
+    ./Install-LeostreamAgent.ps1 -VMName my-desktop-01 -InstallerUri 'https://<your-portal>/LeostreamAgent.msi'
 #>
 [CmdletBinding(SupportsShouldProcess = $true)]
 param(
@@ -37,6 +45,7 @@ param(
 
     [string] $BrokerAddress,
 
+    [Parameter(Mandatory)]
     [string] $VMName
 )
 
@@ -45,9 +54,7 @@ $ErrorActionPreference = 'Stop'
 
 $config = Import-PowerShellDataFile -Path (Resolve-Path $ConfigPath).Path
 $rgName = $config.Azure.ResourceGroupName
-$spec   = $config.VirtualMachines.WindowsDesktop
 
-if (-not $VMName)        { $VMName = $spec.Name }
 if (-not $BrokerAddress) { $BrokerAddress = $config.VirtualMachines.Broker.PrivateIp }
 
 if (-not (Get-AzContext -ErrorAction SilentlyContinue)) {
@@ -56,7 +63,7 @@ if (-not (Get-AzContext -ErrorAction SilentlyContinue)) {
 
 $vm = Get-AzVM -ResourceGroupName $rgName -Name $VMName -ErrorAction SilentlyContinue
 if (-not $vm) {
-    throw "VM '$VMName' not found in resource group '$rgName'. Run Deploy-LeostreamPoC.ps1 first."
+    throw "VM '$VMName' not found in resource group '$rgName'. This PoC deploys no desktops - create one in the Desktop subnet first."
 }
 
 $template = @'

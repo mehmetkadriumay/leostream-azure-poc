@@ -106,31 +106,14 @@
             SecurityType   = 'Standard'
         }
 
-        WindowsDesktop = @{
-            Name           = 'leo-win-01'
-            Role           = 'Desktop'
-            Size           = 'Standard_D4s_v5'
-            Subnet         = 'Desktop'
-            PrivateIp      = '10.50.10.10'
-            PublicIp       = $false
-            OsType         = 'Windows'
-            ManagedIdentity = $false
-            Image          = @{
-                Publisher = 'MicrosoftWindowsDesktop'
-                Offer     = 'windows-11'
-                Sku       = 'win11-23h2-pro'
-                Version   = 'latest'
-            }
-            OsDiskSizeGb   = 128
-            OsDiskType     = 'Premium_LRS'
-            # Windows 11 marketplace images are Gen2 and require Trusted Launch.
-            SecurityType   = 'TrustedLaunch'
-        }
+        # This PoC deploys no desktops. The Desktop subnet and nsg-desktop are
+        # still created, so desktops can be added later - either provisioned by
+        # the Broker through its managed identity, or built separately and
+        # registered with Install-LeostreamAgent.ps1 -VMName <name>.
     }
 
     Admin = @{
         LinuxUsername   = 'leoadmin'
-        WindowsUsername = 'leoadmin'
         # Path to an existing SSH public key used for the RHEL VMs.
         SshPublicKeyPath = '~/.ssh/id_rsa.pub'
     }

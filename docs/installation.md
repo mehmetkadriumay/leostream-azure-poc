@@ -70,11 +70,11 @@ Edit `config/poc.config.psd1`:
 | Setting | Notes |
 |---|---|
 | `Azure.SubscriptionId` | Leave empty to use the current `Get-AzContext`. |
-| `Azure.Location` | Region with RHEL 9 + Windows 11 images and Dsv5 quota. |
+| `Azure.Location` | Region with RHEL 9 images and Dsv5 quota. |
 | `AllowedClientCidrs` | **Change from `0.0.0.0/0`** to your own egress IPs. |
 | `Admin.SshPublicKeyPath` | Path to your SSH public key. |
 | `VirtualMachines.*.Size` | Reduce for a cheaper PoC (for example `Standard_D2s_v5`). |
-| `VirtualMachines.WindowsDesktop.SecurityType` | Leave as `TrustedLaunch` — Windows 11 marketplace images are Gen2 and require it (secure boot and vTPM are enabled automatically). |
+| `VirtualMachines.*.SecurityType` | `Standard` by default. Set `TrustedLaunch` for secure boot and vTPM on the Gen2 RHEL images. |
 | `Bastion.Enabled` | Set `$false` if you already have a jump host. |
 
 Find your public IP for `AllowedClientCidrs`:
@@ -110,13 +110,7 @@ Then deploy:
 ./Deploy-LeostreamPoC.ps1 -Verbose
 ```
 
-You are prompted for the local administrator password for `leo-win-01`, or you
-can pass it in:
-
-```powershell
-$pw = Read-Host -AsSecureString 'Windows admin password'
-./Deploy-LeostreamPoC.ps1 -WindowsAdminPassword $pw
-```
+There is no password prompt — both VMs are Linux and accept SSH keys only.
 
 To save time and cost during an initial test, skip Bastion:
 
@@ -128,9 +122,13 @@ What is created:
 
 1. Resource group `rg-leostream-poc`
 2. Three NSGs with role-specific rules
-3. VNet `vnet-leostream-poc` with four subnets
+3. VNet `vnet-leostream-poc` with four subnets — `snet-desktop` is created but
+   left empty
 4. Azure Bastion (10–20 minutes)
-5. `leo-broker-01`, `leo-gateway-01`, `leo-win-01`
+5. `leo-broker-01` and `leo-gateway-01`
+
+> **No desktops are deployed.** This PoC covers the Leostream control plane
+> only. See [Optional: add a desktop](#optional-add-a-desktop) below.
 
 The script prints a summary including the Gateway public IP. Note it down.
 
@@ -189,29 +187,43 @@ the installer and records the Broker address in `/etc/leostream/gateway.conf`.
 
 ---
 
-## 8. Install the Leostream Agent on the desktop
+## 8. Optional: add a desktop
+
+This PoC deploys no desktops, so the brokering path is not wired up out of the
+box. If you want to test it, create a Windows VM in `snet-desktop`
+(`10.50.10.0/24`) with **no public IP** — Windows 11 marketplace images are Gen2
+and require Trusted Launch — then:
 
 ```powershell
-./Install-LeostreamAgent.ps1 -InstallerUri 'https://<your-portal>/LeostreamAgent.msi'
+./Install-LeostreamAgent.ps1 -VMName <your-desktop-name> `
+    -InstallerUri 'https://<your-portal>/LeostreamAgent.msi'
 ```
 
-This enables Remote Desktop on `leo-win-01`, limits RDP to the gateway,
+This enables Remote Desktop on that VM, limits RDP to the gateway,
 infrastructure and Bastion subnets, then installs the Agent silently with
-`BROKER_ADDRESS` pointed at `10.50.2.10`.
+`BROKER_ADDRESS` pointed at `10.50.2.10`. `nsg-desktop` already allows the
+required traffic, so no network changes are needed.
+
+Skip this step to evaluate the control plane only.
 
 ---
 
 ## 9. Configure Leostream
 
-Open the Broker UI. Because it is private, do one of the following:
-
-* Connect to `leo-win-01` through Azure Bastion and browse to
-  `https://10.50.2.10/` from there, or
-* Create an SSH tunnel through the Gateway:
+Open the Broker UI. It has no public IP, so create an SSH tunnel through the
+Gateway:
 
 ```powershell
 ssh -i $HOME\.ssh\leostream_poc -L 8443:10.50.2.10:443 leoadmin@<gateway-public-ip>
 # then browse to https://localhost:8443/
+```
+
+Bastion native-client tunnelling is an alternative, but it needs
+`Bastion.Sku = 'Standard'` set before deployment:
+
+```powershell
+az network bastion tunnel --name bastion-leostream-poc --resource-group rg-leostream-poc `
+    --target-resource-id <leo-broker-01-resource-id> --resource-port 443 --port 8443
 ```
 
 Then, in the Broker:
@@ -226,8 +238,12 @@ Then, in the Broker:
 4. **Register the Gateway** under *Setup > Gateways*:
    * Address: the Gateway public IP or FQDN
    * Private address: `10.50.1.10`
-5. **Create a pool** under *Configuration > Pools* containing `leo-win-01`.
-6. **Create a protocol plan** that uses RDP through the Gateway.
+5. **Create a protocol plan** that uses RDP through the Gateway.
+
+Steps 1–5 are the full scope of this PoC. If you added a desktop in step 8,
+continue:
+
+6. **Create a pool** under *Configuration > Pools* containing that desktop.
 7. **Create a policy** that offers the pool, and assign it in
    *Configuration > Assignments*.
 

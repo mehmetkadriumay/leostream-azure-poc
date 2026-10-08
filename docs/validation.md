@@ -28,16 +28,15 @@ The script exits with code `1` if any check reports **Fail**.
 | Network | Gateway public IP assigned | No public IP on `leo-gateway-01` |
 | Security | Gateway NSG allows inbound 443 | Rule missing |
 | Security | `leo-broker-01` has no public IP | Public IP attached |
-| Security | `leo-win-01` has no public IP | Public IP attached |
 | Security | `leo-gateway-01` has the expected public IP | Public IP missing |
 | Architecture | Broker and Gateway are separate VMs | Names identical |
-| Compute | All three VMs exist and are running | VM missing (fail) or stopped (warn) |
+| Compute | Both VMs exist and are running | VM missing (fail) or stopped (warn) |
 | Identity | Broker has a system-assigned managed identity | Identity missing |
 | Identity | That identity holds at least one role assignment | RBAC step not run |
 | Infrastructure | Azure Bastion deployed when enabled | Warn only |
 | Service | Gateway TCP/443 reachable from your machine | Warn only |
 | Service | Broker TCP/443 reachable from the Gateway | Warn only |
-| Service | Leostream Agent service running on `leo-win-01` | Warn only |
+| Desktops | Any VM you added to `snet-desktop` has no public IP | A desktop is internet-facing (skipped when the subnet is empty) |
 
 Service checks are warnings rather than failures because the infrastructure can
 legitimately be validated before the Leostream software is installed.
@@ -98,55 +97,64 @@ Invoke-AzVMRunCommand -ResourceGroupName rg-leostream-poc -VMName leo-gateway-01
     -ScriptString 'systemctl is-active leostream-gateway; firewall-cmd --list-all'
 ```
 
-Check the Agent on the desktop:
-
-```powershell
-Invoke-AzVMRunCommand -ResourceGroupName rg-leostream-poc -VMName leo-win-01 `
-    -CommandId RunPowerShellScript `
-    -ScriptString 'Get-Service LeostreamAgent | Format-List Name,Status,StartType'
-```
-
-## 4. End-to-end user test
-
-This is the real acceptance test and must be done by hand.
+## 4. Gateway and Broker login pages
 
 1. From a client whose public IP is inside `AllowedClientCidrs`, browse to
    `https://<gateway-public-ip>/`.
 2. Accept the self-signed certificate warning (expected until you install a
    trusted certificate).
-3. Sign in with a user that has a Leostream policy assigned.
-4. Confirm the offered desktop `leo-win-01` appears.
-5. Launch it and confirm the Windows 11 desktop renders through the Gateway.
-6. In the Broker, check *Resources > Desktops* — the desktop status should be
-   **Connected** and show the assigned user.
-7. Log off and confirm the Broker releases the desktop according to the policy.
+3. Confirm the Leostream login page renders through the Gateway.
+4. Sign in — with no desktops deployed, expect an empty resource list. That is
+   the correct result for this PoC.
 
 ### Negative tests
 
 | Test | Expected result |
 |---|---|
-| RDP directly to `10.50.10.10` from the internet | Fails — no public IP, NSG denies |
 | Browse to `https://10.50.2.10/` from the internet | Fails — Broker is private |
 | Browse to the Gateway from an IP outside `AllowedClientCidrs` | Connection times out |
 | SSH to the Gateway public IP from the internet | Fails — firewalld restricts SSH to `10.50.0.0/16` |
+| Any NIC exists in `snet-desktop` | None — no desktops are deployed |
 
 ## 5. Azure integration test
 
-Confirm the Broker can drive Azure through its managed identity:
+Because this PoC deploys no desktops, the managed identity can only be verified
+**statically** — that it exists and is correctly scoped, not that the Broker can
+actually power a VM.
 
-1. In the Broker, open *Setup > Centers* and select the Azure center.
-2. Run **Refresh** — `leo-win-01` should be discovered.
-3. Stop the desktop from the Broker and confirm with:
+Confirm the identity and its role assignment:
 
 ```powershell
-Get-AzVM -ResourceGroupName rg-leostream-poc -Name leo-win-01 -Status |
+$rg = (Import-PowerShellDataFile ../config/poc.config.psd1).Azure.ResourceGroupName
+$vm = Get-AzVM -ResourceGroupName $rg -Name leo-broker-01
+$vm.Identity | Format-List Type, PrincipalId, TenantId
+
+Get-AzRoleAssignment -ObjectId $vm.Identity.PrincipalId |
+    Format-Table RoleDefinitionName, Scope
+```
+
+Expect `Type = SystemAssigned` and a `Virtual Machine Contributor` assignment
+scoped to the resource group.
+
+Then, in the Broker, open *Setup > Centers*, select the Azure center and run
+**Refresh**. It should authenticate without a secret and return an empty VM
+list — authentication succeeding is the thing being tested here.
+
+### Not covered without a desktop
+
+Proving the Broker can start and stop a VM requires a desktop. To test it, add a
+Windows VM to `snet-desktop`, register it with
+`Install-LeostreamAgent.ps1 -VMName <name>`, then stop it from the Broker and
+confirm with:
+
+```powershell
+Get-AzVM -ResourceGroupName $rg -Name <your-desktop-name> -Status |
     Select-Object -ExpandProperty Statuses |
     Where-Object Code -like 'PowerState/*'
 ```
 
-4. Start it again from the Broker and confirm it returns to `VM running`.
-
-If this works, the managed identity and RBAC configuration are correct and no
+Start it again from the Broker and confirm it returns to `VM running`. If that
+works, the managed identity and RBAC configuration are proven end to end and no
 service-principal secret is needed anywhere.
 
 ## 6. Validation record
@@ -155,9 +163,13 @@ service-principal secret is needed anywhere.
 |---|---|---|
 | `Test-LeostreamPoC.ps1` exits 0 | | |
 | Only Gateway and Bastion have public IPs | | |
-| Broker managed identity holds a role assignment | | |
+| Broker managed identity exists and is `SystemAssigned` | | |
+| Broker managed identity holds a role assignment at the expected scope | | |
 | Broker reachable from the Gateway | | |
-| Agent service running on `leo-win-01` | | |
-| End-to-end desktop session succeeds | | |
+| Gateway login page renders from an allowed client IP | | |
+| Azure center authenticates from the Broker without a secret | | |
 | Negative tests all fail as expected | | |
-| Broker can stop and start the desktop via Azure | | |
+
+The following need a desktop and are **out of scope** unless you add one: Agent
+registration, pool and policy assignment, an end-to-end user session, and
+Broker-driven VM power control.

@@ -7,24 +7,22 @@
 
 .DESCRIPTION
     Creates (idempotently) the resource group, virtual network, subnets, network
-    security groups, optional Azure Bastion host and three virtual machines:
+    security groups, optional Azure Bastion host and two virtual machines:
 
-        leo-broker-01   RHEL 9     private only, system-assigned managed identity
-        leo-gateway-01  RHEL 9     public HTTPS endpoint
-        leo-win-01      Windows 11 private only
+        leo-broker-01   RHEL 9  private only, system-assigned managed identity
+        leo-gateway-01  RHEL 9  public HTTPS endpoint
 
     Broker and Gateway are deliberately separate virtual machines.
 
-    No secrets are stored in this repository. The Windows administrator password
-    is supplied as a SecureString parameter (or prompted for), and the Linux VMs
-    use SSH public-key authentication only.
+    No desktops are deployed. The Desktop subnet and nsg-desktop are still
+    created so desktops can be added later, either provisioned by the Broker
+    through its managed identity or built separately.
+
+    No secrets are stored in this repository. The Linux VMs use SSH public-key
+    authentication only.
 
 .PARAMETER ConfigPath
     Path to poc.config.psd1. Defaults to ../config/poc.config.psd1.
-
-.PARAMETER WindowsAdminPassword
-    SecureString password for the local administrator on leo-win-01.
-    If omitted you are prompted interactively.
 
 .PARAMETER SkipBastion
     Do not deploy the Azure Bastion host (saves cost; you then need another
@@ -37,14 +35,11 @@
     ./Deploy-LeostreamPoC.ps1
 
 .EXAMPLE
-    $pw = Read-Host -AsSecureString 'Windows admin password'
-    ./Deploy-LeostreamPoC.ps1 -WindowsAdminPassword $pw -Verbose
+    ./Deploy-LeostreamPoC.ps1 -SkipBastion -Verbose
 #>
 [CmdletBinding(SupportsShouldProcess = $true)]
 param(
     [string] $ConfigPath = (Join-Path (Join-Path $PSScriptRoot '..') (Join-Path 'config' 'poc.config.psd1')),
-
-    [securestring] $WindowsAdminPassword,
 
     [switch] $SkipBastion
 )
@@ -115,14 +110,6 @@ if (-not (Test-Path -Path $sshKeyPath)) {
 }
 $sshPublicKey = (Get-Content -Path $sshKeyPath -Raw).Trim()
 Write-Ok "Using SSH public key: $sshKeyPath"
-
-# --- Windows password ---------------------------------------------------------
-if (-not $WindowsAdminPassword) {
-    $WindowsAdminPassword = Read-Host -Prompt "Local administrator password for $($config.VirtualMachines.WindowsDesktop.Name)" -AsSecureString
-}
-if (-not $WindowsAdminPassword -or $WindowsAdminPassword.Length -eq 0) {
-    throw 'A Windows administrator password is required.'
-}
 
 #region resource group --------------------------------------------------------
 
@@ -313,7 +300,7 @@ if (-not $vnet) {
     if ($WhatIfPreference) {
         Write-Host ''
         Write-Host 'WhatIf: the virtual network does not exist yet, so the virtual machines cannot be previewed.' -ForegroundColor Yellow
-        Write-Host 'WhatIf: they would be created as leo-broker-01, leo-gateway-01 and leo-win-01.' -ForegroundColor Yellow
+        Write-Host 'WhatIf: they would be created as leo-broker-01 and leo-gateway-01.' -ForegroundColor Yellow
         return
     }
     throw "Virtual network '$($config.Network.VNetName)' could not be created or retrieved."
@@ -379,8 +366,7 @@ function New-PocVirtualMachine {
     param(
         [Parameter(Mandatory)][hashtable] $Spec,
         [Parameter(Mandatory)][string]    $SubnetId,
-        [securestring] $WindowsPassword,
-        [string] $SshKey
+        [Parameter(Mandatory)][string]    $SshKey
     )
 
     $vmName = $Spec.Name
@@ -442,29 +428,24 @@ function New-PocVirtualMachine {
     }
     $vmConfig = New-AzVMConfig @vmConfigParams
 
-    if ($Spec.OsType -eq 'Linux') {
-        $placeholder = ConvertTo-SecureString -String ([guid]::NewGuid().ToString() + '!Aa1') -AsPlainText -Force
-        $cred = [pscredential]::new($config.Admin.LinuxUsername, $placeholder)
-
-        $vmConfig = Set-AzVMOperatingSystem -VM $vmConfig -Linux `
-            -ComputerName $vmName `
-            -Credential $cred `
-            -DisablePasswordAuthentication
-
-        $vmConfig = Add-AzVMSshPublicKey -VM $vmConfig `
-            -KeyData $SshKey `
-            -Path "/home/$($config.Admin.LinuxUsername)/.ssh/authorized_keys"
-    }
-    else {
-        $cred = [pscredential]::new($config.Admin.WindowsUsername, $WindowsPassword)
-        $vmConfig = Set-AzVMOperatingSystem -VM $vmConfig -Windows `
-            -ComputerName $vmName `
-            -Credential $cred `
-            -ProvisionVMAgent `
-            -EnableAutoUpdate
+    if ($Spec.OsType -ne 'Linux') {
+        throw "VM '$vmName' has OsType '$($Spec.OsType)'. This PoC deploys Linux VMs only."
     }
 
-    # Windows 11 marketplace images are Gen2 and require Trusted Launch.
+    $placeholder = ConvertTo-SecureString -String ([guid]::NewGuid().ToString() + '!Aa1') -AsPlainText -Force
+    $cred = [pscredential]::new($config.Admin.LinuxUsername, $placeholder)
+
+    $vmConfig = Set-AzVMOperatingSystem -VM $vmConfig -Linux `
+        -ComputerName $vmName `
+        -Credential $cred `
+        -DisablePasswordAuthentication
+
+    $vmConfig = Add-AzVMSshPublicKey -VM $vmConfig `
+        -KeyData $SshKey `
+        -Path "/home/$($config.Admin.LinuxUsername)/.ssh/authorized_keys"
+
+    # Optional: set SecurityType = 'TrustedLaunch' in poc.config.psd1 to enable
+    # secure boot and vTPM. The RHEL 9 Gen2 images support it.
     if ($Spec.ContainsKey('SecurityType') -and $Spec.SecurityType -eq 'TrustedLaunch') {
         $vmConfig = Set-AzVMSecurityProfile -VM $vmConfig -SecurityType 'TrustedLaunch'
         $vmConfig = Set-AzVMUefi -VM $vmConfig -EnableVtpm $true -EnableSecureBoot $true
@@ -498,7 +479,6 @@ Write-Step 'Virtual machines'
 
 $brokerSpec  = $config.VirtualMachines.Broker
 $gatewaySpec = $config.VirtualMachines.Gateway
-$winSpec     = $config.VirtualMachines.WindowsDesktop
 
 if ($brokerSpec.Name -eq $gatewaySpec.Name) {
     throw 'Broker and Gateway must be deployed as separate virtual machines.'
@@ -506,7 +486,6 @@ if ($brokerSpec.Name -eq $gatewaySpec.Name) {
 
 New-PocVirtualMachine -Spec $brokerSpec  -SubnetId (Get-PocSubnetId $brokerSpec.Subnet)  -SshKey $sshPublicKey | Out-Null
 New-PocVirtualMachine -Spec $gatewaySpec -SubnetId (Get-PocSubnetId $gatewaySpec.Subnet) -SshKey $sshPublicKey | Out-Null
-New-PocVirtualMachine -Spec $winSpec     -SubnetId (Get-PocSubnetId $winSpec.Subnet)     -WindowsPassword $WindowsAdminPassword | Out-Null
 
 #endregion
 
@@ -531,7 +510,7 @@ if ($gatewayPip) {
     GatewayPrivateIp = $gatewaySpec.PrivateIp
     GatewayPublicIp  = $gatewayPublicIp
     GatewayFqdn      = $gatewayFqdn
-    WindowsPrivateIp = $winSpec.PrivateIp
+    DesktopSubnet    = "$($config.Network.Subnets.Desktop.AddressPrefix) (empty - no desktops deployed)"
     BastionDeployed  = ($config.Bastion.Enabled -and -not $SkipBastion)
 } | Format-List
 
@@ -540,7 +519,9 @@ Write-Host 'Next steps:' -ForegroundColor Green
 Write-Host '  1. ./Configure-LeostreamAzureRBAC.ps1   # grant the Broker managed identity access'
 Write-Host '  2. ./Install-LeostreamBroker.ps1        # install Leostream Platform 26 on leo-broker-01'
 Write-Host '  3. ./Install-LeostreamGateway.ps1       # install the Leostream Gateway on leo-gateway-01'
-Write-Host '  4. ./Install-LeostreamAgent.ps1         # install the Leostream Agent on leo-win-01'
-Write-Host '  5. ./Test-LeostreamPoC.ps1              # validate the deployment'
+Write-Host '  4. ./Test-LeostreamPoC.ps1              # validate the deployment'
+Write-Host ''
+Write-Host 'No desktops are deployed. To add one later, create a VM in the Desktop' -ForegroundColor DarkGray
+Write-Host 'subnet and run: ./Install-LeostreamAgent.ps1 -VMName <name> -InstallerUri <uri>' -ForegroundColor DarkGray
 
 #endregion
