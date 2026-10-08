@@ -1,0 +1,102 @@
+# ---------------------------------------------------------------------------
+# Installers and binaries - never commit Leostream media
+# ---------------------------------------------------------------------------
+*.rpm
+*.msi
+*.exe
+*.iso
+*.vhd
+*.vhdx
+*.zip
+*.tar
+*.tar.gz
+*.tgz
+*.bin
+*.run
+installers/
+downloads/
+media/
+
+# ---------------------------------------------------------------------------
+# Secrets, credentials and licence material
+# ---------------------------------------------------------------------------
+*.key
+*.pem
+*.pfx
+*.p12
+*.cer
+*.crt
+*.csr
+*.jks
+*.keystore
+id_rsa
+id_rsa.*
+id_ed25519
+id_ed25519.*
+*.ppk
+.env
+.env.*
+secrets.json
+secrets/
+credentials
+credentials.*
+*.credential
+*.secret
+*licen[cs]e*.key
+*licen[cs]e*.lic
+*.lic
+serial*.txt
+azureProfile.json
+AzureRmContext.json
+*.publishsettings
+
+# ---------------------------------------------------------------------------
+# Local / machine-specific configuration overrides
+# ---------------------------------------------------------------------------
+config/*.local.psd1
+config/local.*
+config/poc.config.local.psd1
+local.settings.json
+*.local.json
+
+# ---------------------------------------------------------------------------
+# Logs and transcripts
+# ---------------------------------------------------------------------------
+*.log
+logs/
+transcripts/
+PowerShell_transcript.*
+*.trx
+
+# ---------------------------------------------------------------------------
+# Terraform / Bicep build artefacts (if added later)
+# ---------------------------------------------------------------------------
+*.tfstate
+*.tfstate.*
+.terraform/
+*.tfvars
+!example.tfvars
+*.bicepparam.local
+
+# ---------------------------------------------------------------------------
+# Editor and OS noise
+# ---------------------------------------------------------------------------
+.vs/
+.vscode/*
+!.vscode/extensions.json
+.idea/
+*.swp
+*~
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+.DS_Store
+
+# ---------------------------------------------------------------------------
+# PowerShell module cache / test output
+# ---------------------------------------------------------------------------
+Modules/
+output/
+testResults/
+*.nupkg
