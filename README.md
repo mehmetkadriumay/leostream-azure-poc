@@ -103,7 +103,7 @@ leostream-azure-poc/
 
 | Requirement | Minimum |
 |---|---|
-| PowerShell | 7.4+ |
+| PowerShell | Windows PowerShell **5.1** or PowerShell **7.4+** (7.x recommended) |
 | Az modules | `Az.Accounts`, `Az.Resources`, `Az.Network`, `Az.Compute` (11.0+) |
 | Azure permissions | Contributor **and** User Access Administrator (or Owner) on the subscription |
 | Azure quota | ~10 vCPUs of the `Dsv5` family in the target region |

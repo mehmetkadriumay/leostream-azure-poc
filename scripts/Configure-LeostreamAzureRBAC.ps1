@@ -1,4 +1,4 @@
-#Requires -Version 7.0
+#Requires -Version 5.1
 #Requires -Modules Az.Accounts, Az.Resources, Az.Compute
 
 <#
@@ -32,7 +32,7 @@
 #>
 [CmdletBinding(SupportsShouldProcess = $true)]
 param(
-    [string] $ConfigPath = (Join-Path $PSScriptRoot '..' 'config' 'poc.config.psd1'),
+    [string] $ConfigPath = (Join-Path (Join-Path $PSScriptRoot '..') (Join-Path 'config' 'poc.config.psd1')),
 
     [ValidateSet('ResourceGroup', 'Subscription')]
     [string] $Scope,

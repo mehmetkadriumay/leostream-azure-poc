@@ -1,4 +1,4 @@
-#Requires -Version 7.0
+#Requires -Version 5.1
 #Requires -Modules Az.Accounts, Az.Compute
 
 <#
@@ -29,7 +29,7 @@
 #>
 [CmdletBinding(SupportsShouldProcess = $true)]
 param(
-    [string] $ConfigPath = (Join-Path $PSScriptRoot '..' 'config' 'poc.config.psd1'),
+    [string] $ConfigPath = (Join-Path (Join-Path $PSScriptRoot '..') (Join-Path 'config' 'poc.config.psd1')),
 
     [Parameter(Mandatory)]
     [ValidatePattern('^https://')]
@@ -125,13 +125,17 @@ $script = $template.
 if ($PSCmdlet.ShouldProcess($VMName, 'Install Leostream Agent')) {
     $tempFile = New-TemporaryFile
     try {
-        Set-Content -Path $tempFile -Value $script -Encoding utf8NoBOM
+        # Must be UTF-8 without a BOM and with LF line endings: a BOM or a
+        # stray CR breaks the shebang and bash parsing on RHEL. This also
+        # works on Windows PowerShell 5.1, which has no utf8NoBOM encoding.
+        $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+        [System.IO.File]::WriteAllText($tempFile.FullName, $script.Replace("`r`n", "`n"), $utf8NoBom)
         Write-Host "==> Running installation on $VMName." -ForegroundColor Cyan
         $result = Invoke-AzVMRunCommand `
             -ResourceGroupName $rgName `
             -VMName $VMName `
             -CommandId 'RunPowerShellScript' `
-            -ScriptPath $tempFile
+            -ScriptPath $tempFile.FullName
 
         foreach ($out in $result.Value) {
             Write-Host "--- $($out.DisplayStatus) ---" -ForegroundColor DarkGray

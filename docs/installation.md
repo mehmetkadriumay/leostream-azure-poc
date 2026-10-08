@@ -13,7 +13,7 @@ Leostream installers.
 
 | Requirement | Minimum | Check |
 |---|---|---|
-| PowerShell | 7.4 | `$PSVersionTable.PSVersion` |
+| PowerShell | 5.1 (7.4+ recommended) | `$PSVersionTable.PSVersion` |
 | Az PowerShell modules | 11.0 | `Get-Module Az.Accounts -ListAvailable` |
 | OpenSSH client | any | `ssh -V` |
 | Git | 2.40 | `git --version` |
@@ -21,6 +21,11 @@ Leostream installers.
 ```powershell
 Install-Module Az -Scope CurrentUser -Repository PSGallery -Force
 ```
+
+The scripts run on both **Windows PowerShell 5.1** and **PowerShell 7.x**.
+PowerShell 7 is recommended for clearer error messages and faster Az cmdlets,
+but nothing in this repository requires it. On 5.1 make sure .NET Framework
+4.7.2 or later is installed, which the Az modules need.
 
 ### Azure
 

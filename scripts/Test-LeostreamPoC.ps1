@@ -1,4 +1,4 @@
-#Requires -Version 7.0
+#Requires -Version 5.1
 #Requires -Modules Az.Accounts, Az.Resources, Az.Network, Az.Compute
 
 <#
@@ -32,7 +32,7 @@
 #>
 [CmdletBinding()]
 param(
-    [string] $ConfigPath = (Join-Path $PSScriptRoot '..' 'config' 'poc.config.psd1'),
+    [string] $ConfigPath = (Join-Path (Join-Path $PSScriptRoot '..') (Join-Path 'config' 'poc.config.psd1')),
     [switch] $SkipRemoteChecks
 )
 
@@ -285,7 +285,9 @@ $script:results | Group-Object Status | ForEach-Object {
     Write-Host ("    {0,-5} {1}" -f $_.Name, $_.Count)
 }
 
-$failCount = ($script:results | Where-Object Status -eq 'Fail').Count
+# @() matters: on Windows PowerShell 5.1 a single result is a scalar whose
+# .Count is $null, which would hide exactly one failure.
+$failCount = @($script:results | Where-Object Status -eq 'Fail').Count
 if ($failCount -gt 0) {
     Write-Host ''
     Write-Host "$failCount check(s) failed." -ForegroundColor Red
