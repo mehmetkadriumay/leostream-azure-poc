@@ -431,10 +431,16 @@ function New-PocVirtualMachine {
     if (-not $nic) { return $null }
 
     # ---- VM configuration ----------------------------------------------------
-    $vmConfig = New-AzVMConfig -VMName $vmName -VMSize $Spec.Size
-    if ($Spec.ManagedIdentity) {
-        $vmConfig = Set-AzVMIdentity -VM $vmConfig -IdentityType SystemAssigned
+    $vmConfigParams = @{
+        VMName = $vmName
+        VMSize = $Spec.Size
     }
+    if ($Spec.ManagedIdentity) {
+        # The Broker authenticates to Azure with a system-assigned managed
+        # identity, so no service-principal secret is ever needed.
+        $vmConfigParams['IdentityType'] = 'SystemAssigned'
+    }
+    $vmConfig = New-AzVMConfig @vmConfigParams
 
     if ($Spec.OsType -eq 'Linux') {
         $placeholder = ConvertTo-SecureString -String ([guid]::NewGuid().ToString() + '!Aa1') -AsPlainText -Force
