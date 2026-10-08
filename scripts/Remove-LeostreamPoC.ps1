@@ -54,7 +54,12 @@ if (-not $rg) {
 }
 
 # --- safety check -------------------------------------------------------------
+# Take the expected tag from the configuration so a renamed deployment (for
+# example project=leostream-demo) still passes without needing -Force.
 $expectedTag = 'leostream-poc'
+if ($config.Azure.Tags -and $config.Azure.Tags.ContainsKey('project')) {
+    $expectedTag = $config.Azure.Tags['project']
+}
 $hasPocTag = $rg.Tags -and $rg.Tags.ContainsKey('project') -and $rg.Tags['project'] -eq $expectedTag
 if (-not $hasPocTag -and -not $Force) {
     throw "Resource group '$rgName' is not tagged project=$expectedTag. Re-run with -Force if you are certain."
