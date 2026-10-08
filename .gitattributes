@@ -1,0 +1,18 @@
+# Normalise line endings in the repository so checkouts are deterministic
+# regardless of the contributor's platform or core.autocrlf setting.
+* text=auto
+
+# PowerShell runs fine with either ending; keep these CRLF on Windows checkouts.
+*.ps1   text eol=crlf
+*.psd1  text eol=crlf
+*.psm1  text eol=crlf
+
+# Anything destined for Linux must stay LF. The Install-* scripts additionally
+# convert their embedded shell payloads to LF at run time, because a CR would
+# break the #!/bin/bash shebang on RHEL.
+*.sh    text eol=lf
+
+*.md    text eol=lf
+LICENSE text eol=lf
+.gitignore text eol=lf
+.gitattributes text eol=lf
