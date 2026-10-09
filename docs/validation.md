@@ -1,175 +1,147 @@
-# Validation guide
+# Validation
 
-How to prove that the proof of concept is correct, secure and usable.
-
-## 1. Automated checks
+## Automated checks
 
 ```powershell
-cd scripts
-./Test-LeostreamPoC.ps1
+./Test-LeostreamPoC.ps1                    # everything
+./Test-LeostreamPoC.ps1 -SkipRemoteChecks  # Azure control plane only, no RunCommand
 ```
 
-Control-plane checks only (no RunCommand calls, much faster):
+The script is read-only. It prints one line per check and exits `1` if any check
+fails.
 
-```powershell
-./Test-LeostreamPoC.ps1 -SkipRemoteChecks
-```
-
-The script exits with code `1` if any check reports **Fail**.
-
-### What is checked
-
-| Area | Check | Fails when |
+| Area | Check | Pass means |
 |---|---|---|
-| Infrastructure | Resource group exists | `rg-leostream-poc` is missing |
-| Network | VNet exists with `10.50.0.0/16` | VNet missing |
-| Network | Each of the four subnets exists with the expected prefix | Prefix drift or missing subnet |
-| Network | NSG attached to gateway, infrastructure and desktop subnets | Any subnet unprotected |
-| Network | Gateway public IP assigned | No public IP on `leo-gateway-01` |
-| Security | Gateway NSG allows inbound 443 | Rule missing |
-| Security | `leo-broker-01` has no public IP | Public IP attached |
-| Security | `leo-gateway-01` has the expected public IP | Public IP missing |
-| Architecture | Broker and Gateway are separate VMs | Names identical |
-| Compute | Both VMs exist and are running | VM missing (fail) or stopped (warn) |
-| Identity | Broker has a system-assigned managed identity | Identity missing |
-| Identity | That identity holds at least one role assignment | RBAC step not run |
-| Infrastructure | Azure Bastion deployed when enabled | Warn only |
-| Service | Gateway TCP/443 reachable from your machine | Warn only |
-| Service | Broker TCP/443 reachable from the Gateway | Warn only |
-| Desktops | Any VM you added to `snet-desktop` has no public IP | A desktop is internet-facing (skipped when the subnet is empty) |
+| Infrastructure | Resource group exists | `rg-leostream-poc` is present |
+| Network | Virtual network exists | `vnet-leostream-poc` with the configured address space |
+| Network | Subnet `snet-leostream` | Present with prefix `10.50.1.0/24` |
+| Network | NSG attached to the subnet | `nsg-leostream` is bound, not dangling |
+| Security | Inbound TCP/443 allowed | A rule permits user traffic to the Gateway |
+| Security | Inbound TCP/22 allowed | Your administrative path exists |
+| Architecture | Broker and Gateway are separate VMs | The core requirement holds |
+| Compute | `leo-broker-01` running | Power state is `VM running` |
+| Compute | `leo-gateway-01` running | Power state is `VM running` |
+| Security | `leo-broker-01` is private only | No public IP on its NIC |
+| Security | `leo-gateway-01` has the expected public IP | Exactly one, as designed |
+| Identity | Broker managed identity | System-assigned identity with a principal ID |
+| Identity | Broker role assignment | At least one role is assigned to that identity |
+| Network | Gateway public IP assigned | The static IP is allocated |
+| Service | Gateway TCP/443 reachable | Your machine can open 443 |
+| Service | Gateway TCP/22 reachable | Your machine can open 22 |
+| Service | Broker HTTPS reachable from Gateway | RunCommand on the Gateway opens 443 on `10.50.1.10` |
 
-Service checks are warnings rather than failures because the infrastructure can
-legitimately be validated before the Leostream software is installed.
+### Interpreting non-pass results
 
-## 2. Manual infrastructure spot checks
+* **Warn on TCP/443 or TCP/22** — either your IP is outside `AllowedClientCidrs`,
+  or the Leostream software is not installed yet. Check the CIDR first.
+* **Warn on Broker HTTPS from Gateway** — the Broker VM is up but the Leostream
+  service is not listening. Re-run `Install-LeostreamBroker.ps1` or check
+  `systemctl status leostream`.
+* **Skip on the in-VNet check** — RunCommand could not run, usually because the
+  guest agent is still starting. Wait and retry.
+* **Fail on the role assignment** — run `Configure-LeostreamAzureRBAC.ps1`.
 
-Confirm the Broker really has no public IP:
+## Manual checks
 
-```powershell
-Get-AzNetworkInterface -ResourceGroupName rg-leostream-poc -Name nic-leo-broker-01 |
-    Select-Object -ExpandProperty IpConfigurations |
-    Select-Object Name, PrivateIpAddress, PublicIpAddress
-```
+The script cannot verify these. Do them once by hand.
 
-List effective NSG rules on the gateway subnet:
-
-```powershell
-(Get-AzNetworkSecurityGroup -ResourceGroupName rg-leostream-poc -Name nsg-gateway).SecurityRules |
-    Sort-Object Priority |
-    Format-Table Priority, Name, Direction, Access, Protocol, DestinationPortRange
-```
-
-Confirm the Broker's managed identity and its role:
+### 1. Administrative access works
 
 ```powershell
-$vm = Get-AzVM -ResourceGroupName rg-leostream-poc -Name leo-broker-01
-$vm.Identity | Format-List Type, PrincipalId, TenantId
-Get-AzRoleAssignment -ObjectId $vm.Identity.PrincipalId |
-    Format-Table RoleDefinitionName, Scope
+$gw = '<gateway-public-ip>'
+ssh -i $HOME\.ssh\leostream_poc leoadmin@$gw                            # Gateway
+ssh -i $HOME\.ssh\leostream_poc -J leoadmin@$gw leoadmin@10.50.1.10     # Broker
 ```
 
-Confirm only the Gateway is internet-facing:
+Both should land you at a shell prompt without a password.
+
+### 2. Broker UI is reachable and only through the tunnel
 
 ```powershell
-Get-AzPublicIpAddress -ResourceGroupName rg-leostream-poc |
-    Format-Table Name, IpAddress, @{n='AttachedTo';e={ $_.IpConfiguration.Id -replace '.*/networkInterfaces/([^/]+)/.*','$1' }}
+ssh -i $HOME\.ssh\leostream_poc -L 8443:10.50.1.10:443 leoadmin@$gw
+# browse to https://localhost:8443/
 ```
 
-Expect exactly two: the Gateway IP and the Bastion IP.
+The Leostream sign-in page should load. The default `admin` / `leo` credentials
+must already have been changed.
 
-## 3. Leostream service checks
+### 3. The Azure center sees your VMs
 
-From the Gateway, confirm the Broker answers:
+In the Broker UI, *Setup > Centers*, open the Azure center and refresh. It should
+list `leo-broker-01` and `leo-gateway-01`. If it lists nothing, the managed
+identity role assignment is missing or scoped to the wrong resource group.
+
+This is the single most important check in the PoC — it proves the managed
+identity integration end to end, with no stored credential anywhere.
+
+### 4. The Gateway is registered
+
+*Setup > Gateways* should show `leo-gateway-01` as reachable.
+
+## Negative tests
+
+Worth running to prove the security posture is real, not assumed.
+
+### The Broker is not reachable from the internet
 
 ```powershell
-Invoke-AzVMRunCommand -ResourceGroupName rg-leostream-poc -VMName leo-gateway-01 `
-    -CommandId RunShellScript `
-    -ScriptString 'curl -sk -o /dev/null -w "%{http_code}\n" https://10.50.2.10/'
+Test-NetConnection -ComputerName <gateway-public-ip> -Port 443   # expect success
 ```
 
-Expect `200` or `302`.
-
-Check the Gateway service state:
-
-```powershell
-Invoke-AzVMRunCommand -ResourceGroupName rg-leostream-poc -VMName leo-gateway-01 `
-    -CommandId RunShellScript `
-    -ScriptString 'systemctl is-active leostream-gateway; firewall-cmd --list-all'
-```
-
-## 4. Gateway and Broker login pages
-
-1. From a client whose public IP is inside `AllowedClientCidrs`, browse to
-   `https://<gateway-public-ip>/`.
-2. Accept the self-signed certificate warning (expected until you install a
-   trusted certificate).
-3. Confirm the Leostream login page renders through the Gateway.
-4. Sign in — with no desktops deployed, expect an empty resource list. That is
-   the correct result for this PoC.
-
-### Negative tests
-
-| Test | Expected result |
-|---|---|
-| Browse to `https://10.50.2.10/` from the internet | Fails — Broker is private |
-| Browse to the Gateway from an IP outside `AllowedClientCidrs` | Connection times out |
-| SSH to the Gateway public IP from the internet | Fails — firewalld restricts SSH to `10.50.0.0/16` |
-| Any NIC exists in `snet-desktop` | None — no desktops are deployed |
-
-## 5. Azure integration test
-
-Because this PoC deploys no desktops, the managed identity can only be verified
-**statically** — that it exists and is correctly scoped, not that the Broker can
-actually power a VM.
-
-Confirm the identity and its role assignment:
+There is no public address to test against for the Broker — confirm with:
 
 ```powershell
 $rg = (Import-PowerShellDataFile ../config/poc.config.psd1).Azure.ResourceGroupName
-$vm = Get-AzVM -ResourceGroupName $rg -Name leo-broker-01
-$vm.Identity | Format-List Type, PrincipalId, TenantId
-
-Get-AzRoleAssignment -ObjectId $vm.Identity.PrincipalId |
-    Format-Table RoleDefinitionName, Scope
+(Get-AzNetworkInterface -ResourceGroupName $rg -Name nic-leo-broker-01).IpConfigurations.PublicIpAddress
 ```
 
-Expect `Type = SystemAssigned` and a `Virtual Machine Contributor` assignment
-scoped to the resource group.
+Expected output: nothing. A public IP here is a failure.
 
-Then, in the Broker, open *Setup > Centers*, select the Azure center and run
-**Refresh**. It should authenticate without a secret and return an empty VM
-list — authentication succeeding is the thing being tested here.
+### Traffic from outside `AllowedClientCidrs` is dropped
 
-### Not covered without a desktop
-
-Proving the Broker can start and stop a VM requires a desktop. To test it, add a
-Windows VM to `snet-desktop`, register it with
-`Install-LeostreamAgent.ps1 -VMName <name>`, then stop it from the Broker and
-confirm with:
+Temporarily set `AllowedClientCidrs` to a CIDR that is not yours, re-run
+`Deploy-LeostreamPoC.ps1`, and confirm that both SSH and HTTPS now time out.
+Restore your own CIDR afterwards.
 
 ```powershell
-Get-AzVM -ResourceGroupName $rg -Name <your-desktop-name> -Status |
-    Select-Object -ExpandProperty Statuses |
-    Where-Object Code -like 'PowerState/*'
+$rg = (Import-PowerShellDataFile ../config/poc.config.psd1).Azure.ResourceGroupName
+Get-AzEffectiveNetworkSecurityGroup -ResourceGroupName $rg -NetworkInterfaceName nic-leo-gateway-01 |
+    Select-Object -ExpandProperty EffectiveSecurityRules |
+    Where-Object { $_.Direction -eq 'Inbound' -and $_.Access -eq 'Allow' } |
+    Format-Table Name, Protocol, SourceAddressPrefix, DestinationPortRange
 ```
 
-Start it again from the Broker and confirm it returns to `VM running`. If that
-works, the managed identity and RBAC configuration are proven end to end and no
-service-principal secret is needed anywhere.
+### No secrets on disk
 
-## 6. Validation record
+```powershell
+git grep -nEi "password|secret|licen[cs]e key|serial" -- config scripts
+```
 
-| Item | Result | Notes |
-|---|---|---|
-| `Test-LeostreamPoC.ps1` exits 0 | | |
-| Only Gateway and Bastion have public IPs | | |
-| Broker managed identity exists and is `SystemAssigned` | | |
-| Broker managed identity holds a role assignment at the expected scope | | |
-| Broker reachable from the Gateway | | |
-| Gateway login page renders from an allowed client IP | | |
-| Azure center authenticates from the Broker without a secret | | |
-| Negative tests all fail as expected | | |
+Every hit should be a parameter name, a prompt, or a comment — never a value.
 
-The following need a desktop and are **out of scope** unless you add one: Agent
-registration, pool and policy assignment, an end-to-end user session, and
-Broker-driven VM power control.
+## What this PoC does not validate
+
+No desktops are deployed, so none of the following can be tested without adding
+one yourself:
+
+* an end-to-end user session from a client, through the Gateway, to a desktop
+* Leostream Agent registration and check-in
+* pools, policies and assignment logic
+* the Broker starting or stopping a desktop VM through its managed identity
+
+The last point is partially covered: the identity and its role assignment are
+verified, and the Azure center listing your VMs proves the Broker can read them.
+Only the write path (power control) remains unexercised.
+
+## Record your results
+
+| Check | Date | Result | Notes |
+|---|---|---|---|
+| `Test-LeostreamPoC.ps1` all pass | | | |
+| SSH to Gateway and Broker | | | |
+| Broker UI through the tunnel | | | |
+| Azure center lists VMs | | | |
+| Gateway registered in the Broker | | | |
+| Broker has no public IP | | | |
+| Out-of-CIDR traffic dropped | | | |
+| No secrets committed | | | |

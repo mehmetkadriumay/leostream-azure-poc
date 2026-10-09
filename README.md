@@ -1,25 +1,24 @@
 # Leostream Platform 26 on Azure — Proof of Concept
 
-PowerShell automation that stands up a complete, security-minded
-**Leostream Platform 26** proof of concept on Microsoft Azure: a private
-Connection Broker, a separate internet-facing Leostream Gateway, a private
-Windows 11 desktop and Azure Bastion for administration.
+PowerShell automation for the smallest useful **Leostream Platform 26** proof of
+concept on Microsoft Azure: **two virtual machines in one subnet.** A private
+Connection Broker and a separate internet-facing Leostream Gateway. Nothing else.
 
 > **No secrets, installers or licence material live in this repository.**
-> Passwords are prompted for, Linux access is SSH-key only, the Broker uses a
-> system-assigned managed identity, and Leostream media is downloaded at run
-> time from URLs you supply.
+> Linux access is SSH-key only, the Broker uses a system-assigned managed
+> identity, and Leostream media is downloaded at run time from URLs you supply.
 
 ---
 
 ## Contents
 
-- [Architecture at a glance](#architecture-at-a-glance)
+- [Architecture](#architecture)
 - [Repository layout](#repository-layout)
 - [Prerequisites](#prerequisites)
 - [Quick start](#quick-start)
 - [Configuration](#configuration)
 - [Deployment](#deployment)
+- [Administrative access](#administrative-access)
 - [Leostream configuration](#leostream-configuration)
 - [Validation](#validation)
 - [Troubleshooting](#troubleshooting)
@@ -30,62 +29,47 @@ Windows 11 desktop and Azure Bastion for administration.
 
 ---
 
-## Architecture at a glance
+## Architecture
 
 ```mermaid
 flowchart LR
     user([Remote user]) -->|HTTPS 443| gw
-    admin([Admin]) --> bastion
+    admin([You]) -->|SSH 22| gw
 
-    subgraph rg["rg-leostream-poc / vnet-leostream-poc 10.50.0.0/16"]
-        gw["leo-gateway-01<br/>RHEL 9 · public<br/>10.50.1.0/24"]
-        broker["leo-broker-01<br/>RHEL 9 · private<br/>10.50.2.0/24"]
-        win["snet-desktop 10.50.10.0/24<br/><i>empty — no desktops deployed</i>"]
-        bastion["Azure Bastion<br/>10.50.20.0/26"]
+    subgraph rg["rg-leostream-poc · vnet-leostream-poc 10.50.0.0/16"]
+        subgraph sn["snet-leostream 10.50.1.0/24 · nsg-leostream"]
+            gw["leo-gateway-01<br/>RHEL 9 · public IP<br/>10.50.1.20"]
+            broker["leo-broker-01<br/>RHEL 9 · private only<br/>10.50.1.10"]
+        end
     end
 
     gw -->|443| broker
-    gw -.->|3389| win
-    broker -.->|agent| win
     broker -->|managed identity| arm([Azure Resource Manager])
-    bastion --> gw
-    bastion --> broker
 ```
 
 | Component | Resource | OS | Exposure |
 |---|---|---|---|
 | Connection Broker | `leo-broker-01` | RHEL 9 | Private only, system-assigned managed identity |
-| Gateway | `leo-gateway-01` | RHEL 9 | Public TCP/443 only |
-| Administration | Azure Bastion | — | Azure portal / native client |
+| Gateway | `leo-gateway-01` | RHEL 9 | Public IP: TCP/443 for users, TCP/22 for you |
 
-| Subnet | CIDR | Contents |
-|---|---|---|
-| `snet-gateway` | `10.50.1.0/24` | `leo-gateway-01` |
-| `snet-infrastructure` | `10.50.2.0/24` | `leo-broker-01` |
-| `snet-desktop` | `10.50.10.0/24` | *empty — reserved for desktops* |
-| `AzureBastionSubnet` | `10.50.20.0/26` | Azure Bastion |
+Everything sits in one subnet, `snet-leostream` (`10.50.1.0/24`), protected by one
+network security group, `nsg-leostream`, with exactly two inbound rules — 443 and
+22, both restricted to `AllowedClientCidrs`. Azure's built-in rules already allow
+Gateway-to-Broker traffic inside the VNet and deny everything else from the
+internet, so no further rules are needed.
 
 Broker and Gateway are **always separate virtual machines** — the deployment and
 validation scripts both enforce this.
 
-### No desktops are deployed
+**No desktops are deployed.** This PoC covers the Leostream control plane only.
+That means the end-to-end user session, Agent registration, pools, policies and
+the Broker starting/stopping a desktop VM are not exercised out of the box. The
+managed identity and its role assignment *are* deployed and verified, so the
+Azure integration itself is proven. To go further, add a Windows VM to the same
+subnet and install the Leostream Agent on it manually.
 
-This PoC deploys the Leostream **control plane only**: Broker, Gateway and
-Bastion. The desktop subnet and `nsg-desktop` are still created — with RDP
-already permitted from the Gateway and Bastion subnets — so you can add desktops
-later without re-addressing the network.
-
-Because there is no desktop, the following cannot be exercised out of the box:
-
-- end-to-end user session through the Gateway to a desktop
-- Leostream Agent registration, pools, policies and assignment
-- the Broker's managed identity starting/stopping a desktop VM
-
-The managed identity and its role assignment are still deployed and verified
-(`Test-LeostreamPoC.ps1` confirms the identity exists and the role is scoped
-correctly). To exercise the full brokering path, add a Windows VM to
-`snet-desktop` and run
-`./Install-LeostreamAgent.ps1 -VMName <name> -InstallerUri <uri>`.
+**No Azure Bastion.** You administer over SSH to the Gateway's public IP and hop
+to the Broker from there. See [Administrative access](#administrative-access).
 
 Full detail: [docs/architecture.md](docs/architecture.md).
 
@@ -105,11 +89,10 @@ leostream-azure-poc/
 │   ├── installation.md              # step-by-step deployment guide
 │   └── validation.md                # acceptance checks and negative tests
 └── scripts/
-    ├── Deploy-LeostreamPoC.ps1          # RG, VNet, subnets, NSGs, Bastion, 2 VMs
+    ├── Deploy-LeostreamPoC.ps1          # RG, VNet, 1 subnet, 1 NSG, 2 VMs
     ├── Configure-LeostreamAzureRBAC.ps1 # managed identity + role assignment
     ├── Install-LeostreamBroker.ps1      # Platform 26 on leo-broker-01
     ├── Install-LeostreamGateway.ps1     # Gateway on leo-gateway-01
-    ├── Install-LeostreamAgent.ps1       # Agent on a desktop you add later (optional)
     ├── Test-LeostreamPoC.ps1            # validation
     └── Remove-LeostreamPoC.ps1          # teardown
 ```
@@ -123,9 +106,9 @@ leostream-azure-poc/
 | PowerShell | Windows PowerShell **5.1** or PowerShell **7.4+** (7.x recommended) |
 | Az modules | `Az.Accounts`, `Az.Resources`, `Az.Network`, `Az.Compute` (11.0+) |
 | Azure permissions | Contributor **and** User Access Administrator (or Owner) on the subscription |
-| Azure quota | ~10 vCPUs of the `Dsv5` family in the target region |
-| SSH key pair | For the RHEL 9 VMs |
-| Leostream | Evaluation licence plus HTTPS download URLs for the Platform, Gateway and Agent installers |
+| Azure quota | ~6 vCPUs of the `Dsv5` family in the target region |
+| SSH key pair | For the two RHEL 9 VMs |
+| Leostream | Evaluation licence plus HTTPS download URLs for the Platform and Gateway installers |
 
 ```powershell
 Install-Module Az -Scope CurrentUser -Repository PSGallery -Force
@@ -149,7 +132,7 @@ Set-AzContext -Subscription '<subscription-id>'
 
 cd scripts
 
-# 3. Preview, then deploy the infrastructure
+# 3. Preview, then deploy the infrastructure (about 5 minutes)
 ./Deploy-LeostreamPoC.ps1 -WhatIf
 ./Deploy-LeostreamPoC.ps1 -Verbose
 
@@ -176,24 +159,22 @@ Everything is centralised in [`config/poc.config.psd1`](config/poc.config.psd1).
 | `Azure.Location` | `westeurope` | Different region |
 | `Azure.ResourceGroupName` | `rg-leostream-poc` | Naming standards differ |
 | `Network.AddressSpace` | `10.50.0.0/16` | Overlaps existing networks |
-| `Network.Subnets.*` | see table above | Address plan differs |
-| `AllowedClientCidrs` | `0.0.0.0/0` | **Always** — narrow to your egress IPs |
-| `Bastion.Enabled` | `$true` | You already have a jump host |
+| `Network.SubnetPrefix` | `10.50.1.0/24` | Address plan differs |
+| `AllowedClientCidrs` | `0.0.0.0/0` | **Always** — narrow to your egress IP |
 | `VirtualMachines.*.Size` | `D4s_v5` / `D2s_v5` | Cost or performance tuning |
-| `VirtualMachines.*.SecurityType` | `Standard` | You want secure boot and vTPM on the RHEL VMs |
 | `Admin.SshPublicKeyPath` | `~/.ssh/id_rsa.pub` | Your key lives elsewhere |
 | `Rbac.RoleDefinitionName` | `Virtual Machine Contributor` | Broker needs broader or narrower rights |
 | `Rbac.Scope` | `ResourceGroup` | Broker must manage VMs subscription-wide |
 
 The deployment script prints a warning if `AllowedClientCidrs` still contains
-`0.0.0.0/0`.
+`0.0.0.0/0`. That default leaves SSH open to the internet — change it.
 
 ### What is never stored here
 
 * Linux credentials — password auth is disabled, SSH public key only
 * Leostream licence keys and serial numbers — passed as a `SecureString` or
   entered in the Broker UI
-* Leostream RPMs and MSIs — downloaded at run time from URLs you supply
+* Leostream RPMs — downloaded at run time from URLs you supply
 * Azure credentials and service-principal secrets — the Broker uses a
   system-assigned managed identity
 
@@ -206,27 +187,24 @@ The deployment script prints a warning if `AllowedClientCidrs` still contains
 Creates, idempotently:
 
 1. Resource group `rg-leostream-poc` with PoC tags
-2. Three NSGs (`nsg-gateway`, `nsg-infrastructure`, `nsg-desktop`) with
-   least-privilege rules and an explicit deny at priority 4000
-3. VNet `vnet-leostream-poc` with the four subnets (`snet-desktop` is created
-   but left empty)
-4. Azure Bastion (10–20 minutes; skip with `-SkipBastion`)
-5. `leo-broker-01` and `leo-gateway-01`
+2. One NSG, `nsg-leostream`, allowing inbound 443 and 22 from `AllowedClientCidrs`
+3. VNet `vnet-leostream-poc` with one subnet, `snet-leostream`
+4. `leo-broker-01` (private, managed identity) and `leo-gateway-01` (public IP)
 
 ```powershell
-./Deploy-LeostreamPoC.ps1 -WhatIf          # preview
-./Deploy-LeostreamPoC.ps1 -SkipBastion     # cheaper first pass
+./Deploy-LeostreamPoC.ps1 -WhatIf     # preview
 ./Deploy-LeostreamPoC.ps1 -Verbose
 ```
 
-Re-running skips anything that already exists.
+Re-running skips anything that already exists. It finishes by printing the
+Gateway's public IP and the exact SSH commands for administration.
 
 ### 2. RBAC — `Configure-LeostreamAzureRBAC.ps1`
 
 Confirms the Broker's system-assigned managed identity and assigns
 **Virtual Machine Contributor** at resource group scope, retrying while Entra ID
-replicates. It then prints the subscription, tenant and resource group values
-you need in the Broker UI.
+replicates. It then prints the subscription, tenant and resource group values you
+need in the Broker UI.
 
 ```powershell
 ./Configure-LeostreamAzureRBAC.ps1
@@ -235,51 +213,59 @@ you need in the Broker UI.
 
 ### 3–4. Software installation
 
-The installers run through the **Azure RunCommand extension**, so the private
-VMs never need inbound connectivity from the internet.
+The installers run through the **Azure RunCommand extension**, so the Broker
+never needs inbound connectivity from the internet.
 
 | Script | Does |
 |---|---|
 | `Install-LeostreamBroker.ps1` | Updates RHEL 9, installs prerequisites, opens 443/tcp, sets hostname, runs the Platform 26 installer, optionally applies a licence key |
-| `Install-LeostreamGateway.ps1` | Configures firewalld (443 public, SSH VNet-only), applies gateway kernel settings, runs the Gateway installer, records the Broker address |
-| `Install-LeostreamAgent.ps1` *(optional)* | For a desktop you add yourself: enables RDP restricted to the gateway/infra/Bastion subnets, installs the Agent MSI silently with `BROKER_ADDRESS`. Requires `-VMName`. |
+| `Install-LeostreamGateway.ps1` | Configures firewalld (443 and 22 open, with `nsg-leostream` restricting the source), applies gateway kernel settings, runs the Gateway installer, records the Broker address |
 
 Full walkthrough: [docs/installation.md](docs/installation.md).
 
 ---
 
+## Administrative access
+
+There is no Bastion and no jump host. The Gateway's public IP is the single way
+in, and it only accepts connections from `AllowedClientCidrs`.
+
+```powershell
+$gw = '<gateway-public-ip>'      # printed by Deploy-LeostreamPoC.ps1
+
+# Gateway shell
+ssh -i $HOME\.ssh\leostream_poc leoadmin@$gw
+
+# Broker shell, hopping through the Gateway
+ssh -i $HOME\.ssh\leostream_poc -J leoadmin@$gw leoadmin@10.50.1.10
+
+# Broker web UI, tunnelled through the Gateway
+ssh -i $HOME\.ssh\leostream_poc -L 8443:10.50.1.10:443 leoadmin@$gw
+# then browse to https://localhost:8443/
+```
+
+If you would rather not open SSH at all, remove the `Allow-SSH-Inbound` rule and
+drive both VMs with `Invoke-AzVMRunCommand`, which needs no inbound access. You
+then lose the Broker web UI, which you need for the initial Leostream setup.
+
+---
+
 ## Leostream configuration
 
-The Broker has no public IP and there is no desktop to browse from, so reach its
-UI with an SSH tunnel through the Gateway:
-
-```powershell
-ssh -i $HOME\.ssh\leostream_poc -L 8443:10.50.2.10:443 leoadmin@<gateway-public-ip>
-# browse to https://localhost:8443/
-```
-
-Bastion native-client tunnelling also works, but **requires the Standard SKU** —
-set `Bastion.Sku = 'Standard'` in `poc.config.psd1` before deploying:
-
-```powershell
-az network bastion tunnel --name bastion-leostream-poc --resource-group rg-leostream-poc `
-    --target-resource-id <leo-broker-01-resource-id> --resource-port 443 --port 8443
-```
-
-Then:
+Open the Broker UI through the SSH tunnel above, then:
 
 1. Sign in as `admin` / `leo` and **change the password immediately**.
 2. *System > License* — apply your evaluation licence.
 3. *Setup > Centers > Add Center > Azure* — authentication **Managed identity**,
    with the subscription, tenant and resource group printed by the RBAC script.
 4. *Setup > Gateways* — register `leo-gateway-01` (public address for clients,
-   `10.50.1.10` privately).
+   `10.50.1.20` privately).
 5. *Configuration > Protocol Plans* — RDP via the Gateway.
 
 Steps 1–5 are all this PoC exercises. Pools, policies and assignments need at
-least one desktop: add a Windows VM to `snet-desktop`, run
-`./Install-LeostreamAgent.ps1 -VMName <name> -InstallerUri <uri>`, then continue
-with *Configuration > Pools*, *Policies* and *Assignments*.
+least one desktop: add a Windows VM to `snet-leostream`, install the Leostream
+Agent on it pointing at `10.50.1.10`, then continue with *Configuration > Pools*,
+*Policies* and *Assignments*.
 
 ---
 
@@ -290,12 +276,11 @@ with *Configuration > Pools*, *Policies* and *Assignments*.
 ./Test-LeostreamPoC.ps1 -SkipRemoteChecks  # Azure control plane only
 ```
 
-Checks the resource group, VNet and all four subnet prefixes, NSG attachment and
-the Gateway HTTPS rule, that Broker and Gateway are separate VMs, that both VMs
-are running, that only the Gateway is internet-facing, that the Broker has a
-managed identity with a role assignment, that Bastion exists, and that the
-Gateway and Broker respond. Any desktops you have added to `snet-desktop` are
-inventoried and checked for public IPs. Exits `1` on any failure.
+Checks the resource group, VNet and subnet prefix, NSG attachment and both
+inbound rules, that Broker and Gateway are separate VMs, that both are running,
+that only the Gateway is internet-facing, that the Broker has a managed identity
+with a role assignment, and that the Gateway responds on 443 and 22 while the
+Broker responds on 443 from inside the VNet. Exits `1` on any failure.
 
 Manual end-to-end and negative tests: [docs/validation.md](docs/validation.md).
 
@@ -308,19 +293,17 @@ Manual end-to-end and negative tests: [docs/validation.md](docs/validation.md).
 | `SSH public key not found at ...` | `Admin.SshPublicKeyPath` is wrong | Generate a key or correct the path in `poc.config.psd1` |
 | `New-AzVM: ... SkuNotAvailable` | VM size unavailable in the region | Change `VirtualMachines.*.Size` or `Azure.Location` |
 | `OperationNotAllowed ... quota` | Insufficient vCPU quota | Request a quota increase or use smaller sizes |
-| Bastion creation fails | `AzureBastionSubnet` wrong name or smaller than `/26` | Keep the configured name and prefix |
 | `New-AzRoleAssignment` fails repeatedly | No User Access Administrator rights, or replication lag | Get the rights; the script already retries for ~2 minutes |
 | `Invoke-AzVMRunCommand` times out | VM agent not ready | Wait a few minutes after VM creation and retry |
 | Installer download fails inside the VM | URL expired, needs auth, or is not HTTPS | Use a fresh pre-signed HTTPS URL |
-| Gateway page unreachable from your browser | Your IP not in `AllowedClientCidrs` | Add it, re-run `Deploy-LeostreamPoC.ps1` to update the NSG |
+| SSH to the Gateway hangs | Your IP is not in `AllowedClientCidrs` | Add it, then re-run `Deploy-LeostreamPoC.ps1` to update the NSG |
+| Gateway page unreachable from your browser | Same cause as above, or the Gateway software is not installed yet | Fix the CIDR, then check `systemctl status leostream-gateway` |
+| Cannot SSH to the Broker directly | Working as designed — it has no public IP | Use `ssh -J` through the Gateway |
 | Certificate warning on the Gateway | Self-signed certificate | Install a trusted certificate before any real use |
-| No desktops offered to any user | Working as designed — this PoC deploys none | Add a VM to `snet-desktop` and run `Install-LeostreamAgent.ps1 -VMName <name>` |
-| Desktop you added is not offered | Agent not registered, or no policy assigned | Check the Agent service, then the Broker pool/policy/assignment |
+| No desktops offered to any user | Working as designed — this PoC deploys none | Add a VM to the subnet and install the Leostream Agent |
 | Broker cannot see Azure VMs | Role assignment missing or wrong scope | Re-run `Configure-LeostreamAzureRBAC.ps1` |
-| Cannot reach the Broker UI | Working as designed — it is private | Use the SSH tunnel through the Gateway above |
 
-Useful diagnostics (replace the resource group if you changed
-`Azure.ResourceGroupName`):
+Useful diagnostics:
 
 ```powershell
 $rg = (Import-PowerShellDataFile ./config/poc.config.psd1).Azure.ResourceGroupName
@@ -363,29 +346,28 @@ Rough guide for `westeurope`, pay-as-you-go, running continuously:
 |---|---|
 | `leo-broker-01` (D4s_v5) | high |
 | `leo-gateway-01` (D2s_v5) | medium |
-| Azure Bastion Basic | medium, billed hourly plus egress |
-| Managed disks, public IPs | low |
+| Managed disks, one public IP | low |
 
-Deploying no desktops removes the single largest line item from a typical
-Leostream PoC — add them back only for the period you need to test brokering.
-
-Keep a PoC cheap by deploying with `-SkipBastion`, using `Standard_D2s_v5` for
-all VMs, deallocating VMs when idle, and running `Remove-LeostreamPoC.ps1` as
-soon as the evaluation is finished. Always confirm current prices with the
+Two VMs and a public IP are the entire bill — there is no Bastion host and no
+desktop, which are the two largest line items in a typical Leostream PoC. Keep it
+cheaper still by using `Standard_D2s_v5` for both VMs, deallocating them when
+idle, and running `Remove-LeostreamPoC.ps1` as soon as the evaluation is
+finished. Always confirm current prices with the
 [Azure pricing calculator](https://azure.microsoft.com/pricing/calculator/).
 
 ---
 
 ## Security notes
 
-This is a **proof of concept**. Before anything resembling production use:
+This is a **proof of concept**, and a deliberately minimal one. Before anything
+resembling production use:
 
-* Narrow `AllowedClientCidrs` — never leave `0.0.0.0/0`.
+* Narrow `AllowedClientCidrs` — never leave `0.0.0.0/0`, which exposes SSH to the
+  internet.
+* Replace the public SSH path with Azure Bastion or a VPN, and split the Gateway
+  and Broker back into separate subnets with their own NSGs.
 * Install a trusted TLS certificate on the Gateway.
 * Change the default Broker credentials immediately and enable MFA.
-* Join any desktops you add to Entra ID / Active Directory and apply baseline
-  policies. Keep them off public IPs — `nsg-desktop` already denies inbound from
-  the internet.
 * Add diagnostic settings, Microsoft Defender for Cloud and Azure Monitor.
 * Replace the single Broker and Gateway with an HA pair behind a load balancer.
 * Store any operational secrets in Azure Key Vault.

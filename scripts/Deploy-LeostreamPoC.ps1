@@ -6,27 +6,25 @@
     Deploys the Azure infrastructure for a Leostream Platform 26 proof of concept.
 
 .DESCRIPTION
-    Creates (idempotently) the resource group, virtual network, subnets, network
-    security groups, optional Azure Bastion host and two virtual machines:
+    The smallest topology that demonstrates Leostream on Azure:
 
-        leo-broker-01   RHEL 9  private only, system-assigned managed identity
-        leo-gateway-01  RHEL 9  public HTTPS endpoint
+        resource group
+        virtual network with ONE subnet
+        ONE network security group
+        leo-broker-01   RHEL 9, private only, system-assigned managed identity
+        leo-gateway-01  RHEL 9, public IP for HTTPS and administrative SSH
 
     Broker and Gateway are deliberately separate virtual machines.
 
-    No desktops are deployed. The Desktop subnet and nsg-desktop are still
-    created so desktops can be added later, either provisioned by the Broker
-    through its managed identity or built separately.
+    There is no Azure Bastion, no desktop subnet and no jump host. You reach
+    the Gateway over SSH on its public IP, and the Broker by hopping through
+    the Gateway. Lock AllowedClientCidrs down to your own egress IP.
 
-    No secrets are stored in this repository. The Linux VMs use SSH public-key
+    No secrets are stored in this repository. The VMs use SSH public-key
     authentication only.
 
 .PARAMETER ConfigPath
     Path to poc.config.psd1. Defaults to ../config/poc.config.psd1.
-
-.PARAMETER SkipBastion
-    Do not deploy the Azure Bastion host (saves cost; you then need another
-    administrative path to the private VMs).
 
 .PARAMETER WhatIf
     Show what would be created without making changes.
@@ -35,13 +33,11 @@
     ./Deploy-LeostreamPoC.ps1
 
 .EXAMPLE
-    ./Deploy-LeostreamPoC.ps1 -SkipBastion -Verbose
+    ./Deploy-LeostreamPoC.ps1 -WhatIf -Verbose
 #>
 [CmdletBinding(SupportsShouldProcess = $true)]
 param(
-    [string] $ConfigPath = (Join-Path (Join-Path $PSScriptRoot '..') (Join-Path 'config' 'poc.config.psd1')),
-
-    [switch] $SkipBastion
+    [string] $ConfigPath = (Join-Path (Join-Path $PSScriptRoot '..') (Join-Path 'config' 'poc.config.psd1'))
 )
 
 Set-StrictMode -Version Latest
@@ -97,6 +93,7 @@ $config = Import-PocConfig -Path $ConfigPath
 $rgName   = $config.Azure.ResourceGroupName
 $location = $config.Azure.Location
 $tags     = $config.Azure.Tags
+$net      = $config.Network
 
 Connect-PocAzure -SubscriptionId $config.Azure.SubscriptionId | Out-Null
 
@@ -117,7 +114,7 @@ Write-Step "Resource group '$rgName' in $location"
 $rg = Get-AzResourceGroup -Name $rgName -ErrorAction SilentlyContinue
 if (-not $rg) {
     if ($PSCmdlet.ShouldProcess($rgName, 'Create resource group')) {
-        $rg = New-AzResourceGroup -Name $rgName -Location $location -Tag $tags
+        New-AzResourceGroup -Name $rgName -Location $location -Tag $tags | Out-Null
         Write-Ok 'Created.'
     }
 }
@@ -127,173 +124,80 @@ else {
 
 #endregion
 
-#region network security groups ----------------------------------------------
+#region network security group ------------------------------------------------
 
-function New-PocNsgRule {
-    param(
-        [Parameter(Mandatory)][string]   $Name,
-        [Parameter(Mandatory)][int]      $Priority,
-        [Parameter(Mandatory)][string]   $Direction,
-        [Parameter(Mandatory)][string]   $Access,
-        [Parameter(Mandatory)][string]   $Protocol,
-        [Parameter(Mandatory)][string[]] $SourceAddressPrefix,
-        [Parameter(Mandatory)][string[]] $SourcePortRange,
-        [Parameter(Mandatory)][string[]] $DestinationAddressPrefix,
-        [Parameter(Mandatory)][string[]] $DestinationPortRange,
-        [string] $Description = ''
-    )
-
-    New-AzNetworkSecurityRuleConfig `
-        -Name $Name `
-        -Description $Description `
-        -Priority $Priority `
-        -Direction $Direction `
-        -Access $Access `
-        -Protocol $Protocol `
-        -SourceAddressPrefix $SourceAddressPrefix `
-        -SourcePortRange $SourcePortRange `
-        -DestinationAddressPrefix $DestinationAddressPrefix `
-        -DestinationPortRange $DestinationPortRange
-}
-
-function Set-PocNetworkSecurityGroup {
-    [CmdletBinding(SupportsShouldProcess = $true)]
-    param(
-        [Parameter(Mandatory)][string] $Name,
-        [Parameter(Mandatory)][object[]] $Rules
-    )
-
-    $existing = Get-AzNetworkSecurityGroup -ResourceGroupName $rgName -Name $Name -ErrorAction SilentlyContinue
-    if ($existing) {
-        Write-Ok "NSG '$Name' exists - updating rules."
-        if ($PSCmdlet.ShouldProcess($Name, 'Update network security group')) {
-            $existing.SecurityRules.Clear()
-            foreach ($rule in $Rules) { $existing.SecurityRules.Add($rule) }
-            return Set-AzNetworkSecurityGroup -NetworkSecurityGroup $existing
-        }
-        return $existing
-    }
-
-    if ($PSCmdlet.ShouldProcess($Name, 'Create network security group')) {
-        Write-Ok "Creating NSG '$Name'."
-        return New-AzNetworkSecurityGroup `
-            -ResourceGroupName $rgName `
-            -Name $Name `
-            -Location $location `
-            -Tag $tags `
-            -SecurityRules $Rules
-    }
-}
+Write-Step "Network security group '$($net.NsgName)'"
 
 $allowedClients = @($config.AllowedClientCidrs)
 if ($allowedClients -contains '0.0.0.0/0') {
-    Write-Warning 'AllowedClientCidrs contains 0.0.0.0/0 - the Gateway HTTPS endpoint will be reachable from the whole internet. Narrow this in config/poc.config.psd1 for anything beyond a short-lived PoC.'
+    Write-Warning 'AllowedClientCidrs contains 0.0.0.0/0 - the Gateway will accept HTTPS and SSH from the whole internet. Narrow this in config/poc.config.psd1.'
     $allowedClients = @('Internet')
 }
 
-$gwSubnet   = $config.Network.Subnets.Gateway
-$infraSubnet = $config.Network.Subnets.Infrastructure
-$deskSubnet = $config.Network.Subnets.Desktop
-
-Write-Step 'Network security groups'
-
-$gatewayRules = @(
-    New-PocNsgRule -Name 'Allow-HTTPS-Inbound' -Priority 100 -Direction Inbound -Access Allow -Protocol Tcp `
+# Only these two rules are needed. Azure's default rules already allow all
+# traffic within the virtual network (Gateway to Broker) and deny everything
+# else inbound from the internet.
+$rules = @(
+    New-AzNetworkSecurityRuleConfig `
+        -Name 'Allow-HTTPS-Inbound' `
+        -Description 'Leostream Gateway HTTPS and remote viewer traffic' `
+        -Priority 100 -Direction Inbound -Access Allow -Protocol Tcp `
         -SourceAddressPrefix $allowedClients -SourcePortRange '*' `
-        -DestinationAddressPrefix $gwSubnet.AddressPrefix -DestinationPortRange @('443') `
-        -Description 'Leostream Gateway HTTPS / remote viewer traffic'
-    New-PocNsgRule -Name 'Allow-Bastion-SSH' -Priority 200 -Direction Inbound -Access Allow -Protocol Tcp `
-        -SourceAddressPrefix $config.Network.Subnets.Bastion.AddressPrefix -SourcePortRange '*' `
-        -DestinationAddressPrefix $gwSubnet.AddressPrefix -DestinationPortRange @('22') `
-        -Description 'Administrative SSH from Azure Bastion only'
-    New-PocNsgRule -Name 'Deny-All-Inbound' -Priority 4000 -Direction Inbound -Access Deny -Protocol '*' `
-        -SourceAddressPrefix '*' -SourcePortRange '*' `
-        -DestinationAddressPrefix '*' -DestinationPortRange '*' `
-        -Description 'Explicit deny after allow rules'
+        -DestinationAddressPrefix $net.SubnetPrefix -DestinationPortRange '443'
+
+    New-AzNetworkSecurityRuleConfig `
+        -Name 'Allow-SSH-Inbound' `
+        -Description 'Administrative SSH to the Gateway (the Broker has no public IP)' `
+        -Priority 110 -Direction Inbound -Access Allow -Protocol Tcp `
+        -SourceAddressPrefix $allowedClients -SourcePortRange '*' `
+        -DestinationAddressPrefix $net.SubnetPrefix -DestinationPortRange '22'
 )
 
-$infraRules = @(
-    New-PocNsgRule -Name 'Allow-Gateway-To-Broker-HTTPS' -Priority 100 -Direction Inbound -Access Allow -Protocol Tcp `
-        -SourceAddressPrefix $gwSubnet.AddressPrefix -SourcePortRange '*' `
-        -DestinationAddressPrefix $infraSubnet.AddressPrefix -DestinationPortRange @('443') `
-        -Description 'Gateway to Broker web services'
-    New-PocNsgRule -Name 'Allow-Desktop-To-Broker-HTTPS' -Priority 110 -Direction Inbound -Access Allow -Protocol Tcp `
-        -SourceAddressPrefix $deskSubnet.AddressPrefix -SourcePortRange '*' `
-        -DestinationAddressPrefix $infraSubnet.AddressPrefix -DestinationPortRange @('443') `
-        -Description 'Leostream Agent check-in from desktops'
-    New-PocNsgRule -Name 'Allow-Bastion-Admin' -Priority 200 -Direction Inbound -Access Allow -Protocol Tcp `
-        -SourceAddressPrefix $config.Network.Subnets.Bastion.AddressPrefix -SourcePortRange '*' `
-        -DestinationAddressPrefix $infraSubnet.AddressPrefix -DestinationPortRange @('22', '443') `
-        -Description 'Administrative access from Azure Bastion'
-    New-PocNsgRule -Name 'Deny-All-Inbound' -Priority 4000 -Direction Inbound -Access Deny -Protocol '*' `
-        -SourceAddressPrefix '*' -SourcePortRange '*' `
-        -DestinationAddressPrefix '*' -DestinationPortRange '*' `
-        -Description 'Explicit deny after allow rules'
-)
-
-$desktopRules = @(
-    New-PocNsgRule -Name 'Allow-Gateway-RDP' -Priority 100 -Direction Inbound -Access Allow -Protocol Tcp `
-        -SourceAddressPrefix $gwSubnet.AddressPrefix -SourcePortRange '*' `
-        -DestinationAddressPrefix $deskSubnet.AddressPrefix -DestinationPortRange @('3389') `
-        -Description 'RDP proxied through the Leostream Gateway'
-    New-PocNsgRule -Name 'Allow-Broker-Agent' -Priority 110 -Direction Inbound -Access Allow -Protocol Tcp `
-        -SourceAddressPrefix $infraSubnet.AddressPrefix -SourcePortRange '*' `
-        -DestinationAddressPrefix $deskSubnet.AddressPrefix -DestinationPortRange @('443', '8080') `
-        -Description 'Broker to Leostream Agent communication'
-    New-PocNsgRule -Name 'Allow-Bastion-RDP' -Priority 200 -Direction Inbound -Access Allow -Protocol Tcp `
-        -SourceAddressPrefix $config.Network.Subnets.Bastion.AddressPrefix -SourcePortRange '*' `
-        -DestinationAddressPrefix $deskSubnet.AddressPrefix -DestinationPortRange @('3389') `
-        -Description 'Administrative RDP from Azure Bastion'
-    New-PocNsgRule -Name 'Deny-All-Inbound' -Priority 4000 -Direction Inbound -Access Deny -Protocol '*' `
-        -SourceAddressPrefix '*' -SourcePortRange '*' `
-        -DestinationAddressPrefix '*' -DestinationPortRange '*' `
-        -Description 'Explicit deny after allow rules'
-)
-
-$nsgGateway = Set-PocNetworkSecurityGroup -Name $gwSubnet.NsgName    -Rules $gatewayRules
-$nsgInfra   = Set-PocNetworkSecurityGroup -Name $infraSubnet.NsgName -Rules $infraRules
-$nsgDesktop = Set-PocNetworkSecurityGroup -Name $deskSubnet.NsgName  -Rules $desktopRules
+$nsg = Get-AzNetworkSecurityGroup -ResourceGroupName $rgName -Name $net.NsgName -ErrorAction SilentlyContinue
+if ($nsg) {
+    Write-Ok 'Already exists - updating rules.'
+    if ($PSCmdlet.ShouldProcess($net.NsgName, 'Update network security group')) {
+        $nsg.SecurityRules.Clear()
+        foreach ($rule in $rules) { $nsg.SecurityRules.Add($rule) }
+        $nsg = Set-AzNetworkSecurityGroup -NetworkSecurityGroup $nsg
+    }
+}
+elseif ($PSCmdlet.ShouldProcess($net.NsgName, 'Create network security group')) {
+    $nsg = New-AzNetworkSecurityGroup `
+        -ResourceGroupName $rgName `
+        -Name $net.NsgName `
+        -Location $location `
+        -Tag $tags `
+        -SecurityRule $rules
+    Write-Ok 'Created.'
+}
 
 #endregion
 
 #region virtual network -------------------------------------------------------
 
-Write-Step "Virtual network '$($config.Network.VNetName)'"
+Write-Step "Virtual network '$($net.VNetName)' with subnet '$($net.SubnetName)'"
 
-$subnetConfigs = @(
-    New-AzVirtualNetworkSubnetConfig -Name $gwSubnet.Name          -AddressPrefix $gwSubnet.AddressPrefix          -NetworkSecurityGroup $nsgGateway
-    New-AzVirtualNetworkSubnetConfig -Name $infraSubnet.Name       -AddressPrefix $infraSubnet.AddressPrefix       -NetworkSecurityGroup $nsgInfra
-    New-AzVirtualNetworkSubnetConfig -Name $deskSubnet.Name        -AddressPrefix $deskSubnet.AddressPrefix        -NetworkSecurityGroup $nsgDesktop
-    New-AzVirtualNetworkSubnetConfig -Name $config.Network.Subnets.Bastion.Name -AddressPrefix $config.Network.Subnets.Bastion.AddressPrefix
-)
-
-$vnet = Get-AzVirtualNetwork -ResourceGroupName $rgName -Name $config.Network.VNetName -ErrorAction SilentlyContinue
+$vnet = Get-AzVirtualNetwork -ResourceGroupName $rgName -Name $net.VNetName -ErrorAction SilentlyContinue
 if (-not $vnet) {
-    if ($PSCmdlet.ShouldProcess($config.Network.VNetName, 'Create virtual network')) {
+    if ($PSCmdlet.ShouldProcess($net.VNetName, 'Create virtual network')) {
+        $subnetConfig = New-AzVirtualNetworkSubnetConfig `
+            -Name $net.SubnetName `
+            -AddressPrefix $net.SubnetPrefix `
+            -NetworkSecurityGroup $nsg
+
         $vnet = New-AzVirtualNetwork `
             -ResourceGroupName $rgName `
-            -Name $config.Network.VNetName `
+            -Name $net.VNetName `
             -Location $location `
-            -AddressPrefix $config.Network.AddressSpace `
-            -Subnet $subnetConfigs `
+            -AddressPrefix $net.AddressSpace `
+            -Subnet $subnetConfig `
             -Tag $tags
         Write-Ok 'Created.'
     }
 }
 else {
-    Write-Ok 'Already exists - verifying subnets.'
-    $changed = $false
-    foreach ($sc in $subnetConfigs) {
-        $current = $vnet.Subnets | Where-Object { $_.Name -eq $sc.Name }
-        if (-not $current) {
-            $vnet.Subnets.Add($sc)
-            $changed = $true
-            Write-Ok "Adding missing subnet '$($sc.Name)'."
-        }
-    }
-    if ($changed -and $PSCmdlet.ShouldProcess($vnet.Name, 'Update virtual network')) {
-        $vnet = Set-AzVirtualNetwork -VirtualNetwork $vnet
-    }
+    Write-Ok 'Already exists.'
 }
 
 if (-not $vnet) {
@@ -303,56 +207,12 @@ if (-not $vnet) {
         Write-Host 'WhatIf: they would be created as leo-broker-01 and leo-gateway-01.' -ForegroundColor Yellow
         return
     }
-    throw "Virtual network '$($config.Network.VNetName)' could not be created or retrieved."
+    throw "Virtual network '$($net.VNetName)' could not be created or retrieved."
 }
 
-function Get-PocSubnetId {
-    param([Parameter(Mandatory)][string] $SubnetKey)
-    $name = $config.Network.Subnets[$SubnetKey].Name
-    $subnet = $vnet.Subnets | Where-Object { $_.Name -eq $name }
-    if (-not $subnet) { throw "Subnet '$name' not found in VNet '$($vnet.Name)'." }
-    return $subnet.Id
-}
-
-#endregion
-
-#region bastion ---------------------------------------------------------------
-
-if ($config.Bastion.Enabled -and -not $SkipBastion) {
-    Write-Step "Azure Bastion '$($config.Bastion.Name)'"
-
-    $bastion = Get-AzBastion -ResourceGroupName $rgName -Name $config.Bastion.Name -ErrorAction SilentlyContinue
-    if (-not $bastion) {
-        $bastionPip = Get-AzPublicIpAddress -ResourceGroupName $rgName -Name $config.Bastion.PublicIpName -ErrorAction SilentlyContinue
-        if (-not $bastionPip -and $PSCmdlet.ShouldProcess($config.Bastion.PublicIpName, 'Create Bastion public IP')) {
-            $bastionPip = New-AzPublicIpAddress `
-                -ResourceGroupName $rgName `
-                -Name $config.Bastion.PublicIpName `
-                -Location $location `
-                -AllocationMethod Static `
-                -Sku Standard `
-                -Tag $tags
-        }
-
-        if ($PSCmdlet.ShouldProcess($config.Bastion.Name, 'Create Azure Bastion (takes 10+ minutes)')) {
-            Write-Ok 'Creating Bastion host - this typically takes 10 to 20 minutes.'
-            New-AzBastion `
-                -ResourceGroupName $rgName `
-                -Name $config.Bastion.Name `
-                -PublicIpAddress $bastionPip `
-                -VirtualNetwork $vnet `
-                -Sku $config.Bastion.Sku `
-                -ErrorAction Stop | Out-Null
-            Write-Ok 'Created.'
-        }
-    }
-    else {
-        Write-Ok 'Already exists.'
-    }
-}
-else {
-    Write-Ok 'Bastion deployment skipped.'
-}
+$subnet = $vnet.Subnets | Where-Object { $_.Name -eq $net.SubnetName }
+if (-not $subnet) { throw "Subnet '$($net.SubnetName)' not found in VNet '$($vnet.Name)'." }
+$subnetId = $subnet.Id
 
 #endregion
 
@@ -403,12 +263,12 @@ function New-PocVirtualMachine {
     $nic = Get-AzNetworkInterface -ResourceGroupName $rgName -Name $nicName -ErrorAction SilentlyContinue
     if (-not $nic -and $PSCmdlet.ShouldProcess($nicName, 'Create network interface')) {
         $nicParams = @{
-            ResourceGroupName              = $rgName
-            Name                           = $nicName
-            Location                       = $location
-            SubnetId                       = $SubnetId
-            PrivateIpAddress               = $Spec.PrivateIp
-            Tag                            = $tags
+            ResourceGroupName = $rgName
+            Name              = $nicName
+            Location          = $location
+            SubnetId          = $SubnetId
+            PrivateIpAddress  = $Spec.PrivateIp
+            Tag               = $tags
         }
         if ($publicIp) { $nicParams['PublicIpAddressId'] = $publicIp.Id }
         $nic = New-AzNetworkInterface @nicParams
@@ -428,10 +288,6 @@ function New-PocVirtualMachine {
     }
     $vmConfig = New-AzVMConfig @vmConfigParams
 
-    if ($Spec.OsType -ne 'Linux') {
-        throw "VM '$vmName' has OsType '$($Spec.OsType)'. This PoC deploys Linux VMs only."
-    }
-
     $placeholder = ConvertTo-SecureString -String ([guid]::NewGuid().ToString() + '!Aa1') -AsPlainText -Force
     $cred = [pscredential]::new($config.Admin.LinuxUsername, $placeholder)
 
@@ -443,13 +299,6 @@ function New-PocVirtualMachine {
     $vmConfig = Add-AzVMSshPublicKey -VM $vmConfig `
         -KeyData $SshKey `
         -Path "/home/$($config.Admin.LinuxUsername)/.ssh/authorized_keys"
-
-    # Optional: set SecurityType = 'TrustedLaunch' in poc.config.psd1 to enable
-    # secure boot and vTPM. The RHEL 9 Gen2 images support it.
-    if ($Spec.ContainsKey('SecurityType') -and $Spec.SecurityType -eq 'TrustedLaunch') {
-        $vmConfig = Set-AzVMSecurityProfile -VM $vmConfig -SecurityType 'TrustedLaunch'
-        $vmConfig = Set-AzVMUefi -VM $vmConfig -EnableVtpm $true -EnableSecureBoot $true
-    }
 
     $vmConfig = Set-AzVMSourceImage -VM $vmConfig `
         -PublisherName $Spec.Image.Publisher `
@@ -468,7 +317,7 @@ function New-PocVirtualMachine {
     $vmConfig = Set-AzVMBootDiagnostic -VM $vmConfig -Disable
 
     if ($PSCmdlet.ShouldProcess($vmName, 'Create virtual machine')) {
-        Write-Ok "Creating VM '$vmName' ($($Spec.OsType), $($Spec.Size))."
+        Write-Ok "Creating VM '$vmName' ($($Spec.Size))."
         New-AzVM -ResourceGroupName $rgName -Location $location -VM $vmConfig -Tag $tags -ErrorAction Stop | Out-Null
         Write-Ok "VM '$vmName' created."
         return Get-AzVM -ResourceGroupName $rgName -Name $vmName
@@ -484,8 +333,8 @@ if ($brokerSpec.Name -eq $gatewaySpec.Name) {
     throw 'Broker and Gateway must be deployed as separate virtual machines.'
 }
 
-New-PocVirtualMachine -Spec $brokerSpec  -SubnetId (Get-PocSubnetId $brokerSpec.Subnet)  -SshKey $sshPublicKey | Out-Null
-New-PocVirtualMachine -Spec $gatewaySpec -SubnetId (Get-PocSubnetId $gatewaySpec.Subnet) -SshKey $sshPublicKey | Out-Null
+New-PocVirtualMachine -Spec $brokerSpec  -SubnetId $subnetId -SshKey $sshPublicKey | Out-Null
+New-PocVirtualMachine -Spec $gatewaySpec -SubnetId $subnetId -SshKey $sshPublicKey | Out-Null
 
 #endregion
 
@@ -505,14 +354,15 @@ if ($gatewayPip) {
 [pscustomobject]@{
     ResourceGroup    = $rgName
     Location         = $location
-    VNet             = $config.Network.VNetName
+    VNet             = "$($net.VNetName) ($($net.AddressSpace))"
+    Subnet           = "$($net.SubnetName) ($($net.SubnetPrefix))"
     BrokerPrivateIp  = $brokerSpec.PrivateIp
     GatewayPrivateIp = $gatewaySpec.PrivateIp
     GatewayPublicIp  = $gatewayPublicIp
     GatewayFqdn      = $gatewayFqdn
-    DesktopSubnet    = "$($config.Network.Subnets.Desktop.AddressPrefix) (empty - no desktops deployed)"
-    BastionDeployed  = ($config.Bastion.Enabled -and -not $SkipBastion)
 } | Format-List
+
+$user = $config.Admin.LinuxUsername
 
 Write-Host ''
 Write-Host 'Next steps:' -ForegroundColor Green
@@ -521,7 +371,10 @@ Write-Host '  2. ./Install-LeostreamBroker.ps1        # install Leostream Platfo
 Write-Host '  3. ./Install-LeostreamGateway.ps1       # install the Leostream Gateway on leo-gateway-01'
 Write-Host '  4. ./Test-LeostreamPoC.ps1              # validate the deployment'
 Write-Host ''
-Write-Host 'No desktops are deployed. To add one later, create a VM in the Desktop' -ForegroundColor DarkGray
-Write-Host 'subnet and run: ./Install-LeostreamAgent.ps1 -VMName <name> -InstallerUri <uri>' -ForegroundColor DarkGray
+Write-Host 'Administrative access:' -ForegroundColor Green
+Write-Host "  Gateway shell : ssh $user@$gatewayPublicIp"
+Write-Host "  Broker shell  : ssh -J $user@$gatewayPublicIp $user@$($brokerSpec.PrivateIp)"
+Write-Host "  Broker web UI : ssh -L 8443:$($brokerSpec.PrivateIp):443 $user@$gatewayPublicIp"
+Write-Host '                  then browse to https://localhost:8443/'
 
 #endregion

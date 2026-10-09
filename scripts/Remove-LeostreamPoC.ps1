@@ -17,8 +17,8 @@
     part of this PoC unless -Force is supplied.
 
 .PARAMETER KeepResourceGroup
-    Delete the VMs, disks, NICs, public IPs, Bastion, VNet and NSGs but keep
-    the resource group itself.
+    Delete the VMs, disks, NICs, public IP, VNet and NSG but keep the
+    resource group itself.
 
 .PARAMETER Force
     Skip the confirmation prompt and the PoC tag safety check.
@@ -102,11 +102,10 @@ if ($brokerVm -and $brokerVm.Identity -and $brokerVm.Identity.PrincipalId) {
 if ($KeepResourceGroup) {
     Write-Host '==> Deleting individual resources (resource group retained)' -ForegroundColor Cyan
 
-    # Order matters: compute first, then NICs/public IPs, then Bastion/VNet/NSGs.
+    # Order matters: compute first, then NICs/public IPs, then VNet/NSG.
     $order = @(
         'Microsoft.Compute/virtualMachines',
         'Microsoft.Compute/disks',
-        'Microsoft.Network/bastionHosts',
         'Microsoft.Network/networkInterfaces',
         'Microsoft.Network/publicIPAddresses',
         'Microsoft.Network/virtualNetworks',

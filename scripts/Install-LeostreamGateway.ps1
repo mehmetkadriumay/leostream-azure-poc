@@ -84,9 +84,10 @@ sysctl --system >/dev/null
 echo '--- configuring firewall ---'
 firewall-cmd --permanent --add-service=https
 firewall-cmd --permanent --add-port=443/tcp
-# SSH only from inside the virtual network
-firewall-cmd --permanent --remove-service=ssh || true
-firewall-cmd --permanent --add-rich-rule="rule family=ipv4 source address=__VNET_CIDR__ service name=ssh accept"
+# SSH stays open here on purpose. This is the only administrative way into the
+# deployment, and nsg-leostream already restricts the source to
+# AllowedClientCidrs. Narrowing it again here would only risk locking you out.
+firewall-cmd --permanent --add-service=ssh
 firewall-cmd --reload
 
 INSTALLER_URI='__INSTALLER_URI__'
@@ -122,7 +123,6 @@ echo '=== Gateway preparation complete ==='
 $script = $template.
     Replace('__OS_UPDATE__',      $updateCmd).
     Replace('__VM_NAME__',        $spec.Name).
-    Replace('__VNET_CIDR__',      $config.Network.AddressSpace).
     Replace('__INSTALLER_URI__',  $InstallerUri).
     Replace('__BROKER_ADDRESS__', $BrokerAddress)
 

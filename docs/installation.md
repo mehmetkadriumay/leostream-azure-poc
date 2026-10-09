@@ -1,271 +1,188 @@
 # Installation guide
 
-Step-by-step deployment of the Leostream Platform 26 proof of concept on Azure.
+End-to-end walkthrough, from an empty subscription to a working Leostream
+control plane. Budget about 45 minutes, most of which is the Leostream installers
+running inside the VMs.
 
-Estimated time: **45–75 minutes**, most of it waiting for Azure Bastion and the
-Leostream installers.
+## 0. Before you start
 
----
-
-## 1. Prerequisites
-
-### Tooling on your workstation
-
-| Requirement | Minimum | Check |
-|---|---|---|
-| PowerShell | 5.1 (7.4+ recommended) | `$PSVersionTable.PSVersion` |
-| Az PowerShell modules | 11.0 | `Get-Module Az.Accounts -ListAvailable` |
-| OpenSSH client | any | `ssh -V` |
-| Git | 2.40 | `git --version` |
-
-```powershell
-Install-Module Az -Scope CurrentUser -Repository PSGallery -Force
-```
-
-The scripts run on both **Windows PowerShell 5.1** and **PowerShell 7.x**.
-PowerShell 7 is recommended for clearer error messages and faster Az cmdlets,
-but nothing in this repository requires it. On 5.1 make sure .NET Framework
-4.7.2 or later is installed, which the Az modules need.
-
-### Azure
-
-* A subscription where you can create resource groups, VNets, VMs, Bastion and
-  **role assignments** (Owner or User Access Administrator is needed for the
-  RBAC step).
-* Quota for at least 10 vCPUs of the `Dsv5` family in your chosen region.
-* Red Hat Enterprise Linux 9 and Windows 11 marketplace images available in that
-  region.
-
-### Leostream
-
-* A Leostream Platform 26 evaluation licence.
-* Download URLs (HTTPS) for:
-  * the Leostream Platform 26 installer,
-  * the Leostream Gateway installer,
-  * the Leostream Agent MSI.
-
-> These URLs are passed as parameters at run time. **Never commit installers,
-> licence keys or serial numbers to this repository** — `.gitignore` blocks the
-> common file types, but the responsibility is yours.
-
-### SSH key
-
-```powershell
-ssh-keygen -t ed25519 -C "leostream-poc" -f $HOME\.ssh\leostream_poc
-```
-
-Point `Admin.SshPublicKeyPath` in `config/poc.config.psd1` at the `.pub` file.
-
----
-
-## 2. Clone and configure
-
-```powershell
-git clone https://github.com/mehmetkadriumay/leostream-azure-poc.git
-cd leostream-azure-poc
-```
-
-Edit `config/poc.config.psd1`:
-
-| Setting | Notes |
+| Requirement | Detail |
 |---|---|
-| `Azure.SubscriptionId` | Leave empty to use the current `Get-AzContext`. |
-| `Azure.Location` | Region with RHEL 9 images and Dsv5 quota. |
-| `AllowedClientCidrs` | **Change from `0.0.0.0/0`** to your own egress IPs. |
-| `Admin.SshPublicKeyPath` | Path to your SSH public key. |
-| `VirtualMachines.*.Size` | Reduce for a cheaper PoC (for example `Standard_D2s_v5`). |
-| `VirtualMachines.*.SecurityType` | `Standard` by default. Set `TrustedLaunch` for secure boot and vTPM on the Gen2 RHEL images. |
-| `Bastion.Enabled` | Set `$false` if you already have a jump host. |
+| PowerShell | Windows PowerShell 5.1 or PowerShell 7.4+ |
+| Az modules | `Install-Module Az -Scope CurrentUser` |
+| Azure rights | Contributor **and** User Access Administrator (or Owner) |
+| Quota | ~6 vCPUs of the `Dsv5` family in your region |
+| SSH key | `ssh-keygen -t ed25519 -C "leostream-poc" -f $HOME\.ssh\leostream_poc` |
+| Leostream media | HTTPS download URLs for the Platform 26 and Gateway installers, plus an evaluation licence key |
+| Your egress IP | `(Invoke-RestMethod https://api.ipify.org?format=json).ip` |
 
-Find your public IP for `AllowedClientCidrs`:
+## 1. Configure
+
+Edit `config/poc.config.psd1`. Two values matter before the first deployment:
 
 ```powershell
-(Invoke-RestMethod https://api.ipify.org?format=json).ip
+AllowedClientCidrs = @('203.0.113.45/32')   # your egress IP, not 0.0.0.0/0
+Admin = @{
+    LinuxUsername    = 'leoadmin'
+    SshPublicKeyPath = '~/.ssh/leostream_poc.pub'
+}
 ```
 
----
+Leaving `AllowedClientCidrs` at `0.0.0.0/0` opens both HTTPS and SSH to the
+internet. The deployment script warns you, but does not stop.
 
-## 3. Sign in to Azure
+Change `Azure.Location` if `westeurope` is not where you want the PoC, and
+`Azure.ResourceGroupName` if your naming standards differ.
+
+## 2. Sign in
 
 ```powershell
 Connect-AzAccount
 Set-AzContext -Subscription '<subscription-id>'
-Get-AzContext | Format-List Name, Subscription, Tenant
+Get-AzContext | Format-List Name, Account, Subscription, Tenant
 ```
 
----
+Alternatively set `Azure.SubscriptionId` in the config file and let the scripts
+select it for you.
 
-## 4. Deploy the infrastructure
-
-Dry run first:
+## 3. Deploy the infrastructure
 
 ```powershell
 cd scripts
-./Deploy-LeostreamPoC.ps1 -WhatIf
+./Deploy-LeostreamPoC.ps1 -WhatIf      # preview
+./Deploy-LeostreamPoC.ps1 -Verbose     # about 5 minutes
 ```
 
-Then deploy:
+The script creates, in order:
 
-```powershell
-./Deploy-LeostreamPoC.ps1 -Verbose
-```
+1. Resource group, tagged `project=leostream-poc`
+2. `nsg-leostream` with inbound 443 and 22 from `AllowedClientCidrs`
+3. `vnet-leostream-poc` with the single subnet `snet-leostream`
+4. `leo-broker-01` — private, system-assigned managed identity
+5. `leo-gateway-01` — public IP, static, Standard SKU
 
-There is no password prompt — both VMs are Linux and accept SSH keys only.
+Every step checks for an existing resource first, so re-running is safe. NSG
+rules are rewritten on each run, which is how you apply a changed
+`AllowedClientCidrs`.
 
-To save time and cost during an initial test, skip Bastion:
+It finishes by printing the Gateway's public IP and the three SSH commands you
+need for administration. Keep that output.
 
-```powershell
-./Deploy-LeostreamPoC.ps1 -SkipBastion
-```
-
-What is created:
-
-1. Resource group `rg-leostream-poc`
-2. Three NSGs with role-specific rules
-3. VNet `vnet-leostream-poc` with four subnets — `snet-desktop` is created but
-   left empty
-4. Azure Bastion (10–20 minutes)
-5. `leo-broker-01` and `leo-gateway-01`
-
-> **No desktops are deployed.** This PoC covers the Leostream control plane
-> only. See [Optional: add a desktop](#optional-add-a-desktop) below.
-
-The script prints a summary including the Gateway public IP. Note it down.
-
-The script is idempotent: re-running it skips resources that already exist.
-
----
-
-## 5. Grant the Broker its Azure permissions
+## 4. Grant the Broker its Azure role
 
 ```powershell
 ./Configure-LeostreamAzureRBAC.ps1
 ```
 
-This confirms the system-assigned managed identity on `leo-broker-01` and
-assigns **Virtual Machine Contributor** at resource group scope. Directory
-replication can lag, so the script retries the assignment for up to two minutes.
+This confirms the system-assigned managed identity on `leo-broker-01`, enabling
+it if it is somehow missing, and assigns **Virtual Machine Contributor** at
+resource group scope. New identities take a short while to replicate through
+Entra ID, so the script retries for about two minutes before giving up.
 
-Wider scope, if the Broker must also see VMs outside the PoC resource group:
+Record the subscription ID, tenant ID and resource group name it prints — you
+type them into the Broker UI in step 7.
+
+To let the Broker manage VMs outside the resource group:
 
 ```powershell
 ./Configure-LeostreamAzureRBAC.ps1 -Scope Subscription
 ```
 
----
-
-## 6. Install Leostream Platform 26 on the Broker
+## 5. Install Leostream Platform 26 on the Broker
 
 ```powershell
-./Install-LeostreamBroker.ps1 -InstallerUri 'https://<your-portal>/<platform-26-installer>'
+./Install-LeostreamBroker.ps1 -InstallerUri 'https://<portal>/<platform-26-installer>'
 ```
 
-The script runs through the Azure RunCommand extension, so no inbound SSH is
-needed. It updates RHEL 9, installs prerequisites, opens 443/tcp in firewalld,
-sets the hostname and runs the installer.
+The script runs through the Azure RunCommand extension, so the Broker needs no
+inbound connectivity. Inside the VM it updates RHEL 9, installs prerequisites,
+sets the hostname, opens 443/tcp in firewalld, downloads and runs the installer,
+and optionally applies a licence key.
 
-Optionally supply the licence key as a SecureString:
+To supply the licence non-interactively:
 
 ```powershell
-$lic = Read-Host -AsSecureString 'Leostream licence key'
-./Install-LeostreamBroker.ps1 -InstallerUri 'https://...' -LicenseKey $lic
+$licence = Read-Host -AsSecureString 'Leostream licence key'
+./Install-LeostreamBroker.ps1 -InstallerUri 'https://...' -LicenseKey $licence
 ```
 
-Otherwise complete licensing in the Broker web interface.
+Allow 10–20 minutes. RunCommand streams the output back when the script finishes,
+not as it runs, so a long silence is normal.
 
----
-
-## 7. Install the Leostream Gateway
+## 6. Install the Leostream Gateway
 
 ```powershell
-./Install-LeostreamGateway.ps1 -InstallerUri 'https://<your-portal>/<gateway-installer>'
+./Install-LeostreamGateway.ps1 -InstallerUri 'https://<portal>/<gateway-installer>'
 ```
 
-This configures firewalld (443 open to the internet, SSH restricted to
-`10.50.0.0/16`), applies the kernel forwarding settings the Gateway needs, runs
-the installer and records the Broker address in `/etc/leostream/gateway.conf`.
+This configures firewalld (443 and 22 open), applies the kernel settings the
+Gateway needs, runs the installer, and records the Broker's private address so
+the Gateway knows where to forward.
 
----
+The host firewall deliberately leaves SSH open: `nsg-leostream` is the single
+place that restricts who can reach it, and since the Gateway is your only way in,
+a second, independently configured restriction is a good way to lock yourself
+out.
 
-## 8. Optional: add a desktop
+The Broker address defaults to `VirtualMachines.Broker.PrivateIp` from config.
+Override it with `-BrokerAddress` if you changed the addressing.
 
-This PoC deploys no desktops, so the brokering path is not wired up out of the
-box. If you want to test it, create a Windows VM in `snet-desktop`
-(`10.50.10.0/24`) with **no public IP** — Windows 11 marketplace images are Gen2
-and require Trusted Launch — then:
+## 7. Configure Leostream
+
+Open the Broker UI through an SSH tunnel on the Gateway:
 
 ```powershell
-./Install-LeostreamAgent.ps1 -VMName <your-desktop-name> `
-    -InstallerUri 'https://<your-portal>/LeostreamAgent.msi'
+$gw = '<gateway-public-ip>'
+ssh -i $HOME\.ssh\leostream_poc -L 8443:10.50.1.10:443 leoadmin@$gw
 ```
 
-This enables Remote Desktop on that VM, limits RDP to the gateway,
-infrastructure and Bastion subnets, then installs the Agent silently with
-`BROKER_ADDRESS` pointed at `10.50.2.10`. `nsg-desktop` already allows the
-required traffic, so no network changes are needed.
+Leave that session open and browse to `https://localhost:8443/`. Accept the
+self-signed certificate warning.
 
-Skip this step to evaluate the control plane only.
+1. **Sign in** as `admin` / `leo`, then change the password immediately.
+2. **System > License** — apply your evaluation licence.
+3. **Setup > Centers > Add Center > Azure** — choose authentication
+   **Managed identity**, and enter the subscription, tenant and resource group
+   from step 4. Save, then confirm the center lists your VMs.
+4. **Setup > Gateways** — add `leo-gateway-01`. Clients connect to the public
+   address; the Broker talks to it on `10.50.1.20`.
+5. **Configuration > Protocol Plans** — create a plan that uses RDP through the
+   Gateway.
 
----
+That is the full extent of what this PoC configures. Pools, policies and
+assignments require at least one desktop.
 
-## 9. Configure Leostream
-
-Open the Broker UI. It has no public IP, so create an SSH tunnel through the
-Gateway:
-
-```powershell
-ssh -i $HOME\.ssh\leostream_poc -L 8443:10.50.2.10:443 leoadmin@<gateway-public-ip>
-# then browse to https://localhost:8443/
-```
-
-Bastion native-client tunnelling is an alternative, but it needs
-`Bastion.Sku = 'Standard'` set before deployment:
-
-```powershell
-az network bastion tunnel --name bastion-leostream-poc --resource-group rg-leostream-poc `
-    --target-resource-id <leo-broker-01-resource-id> --resource-port 443 --port 8443
-```
-
-Then, in the Broker:
-
-1. **Sign in** with the default `admin` / `leo` account and change the password
-   immediately.
-2. **Licence** the Broker under *System > License*.
-3. **Add the Azure center** under *Setup > Centers > Add Center > Azure*:
-   * Authentication: **Managed identity**
-   * Subscription ID and Tenant ID: printed by `Configure-LeostreamAzureRBAC.ps1`
-   * Resource group: `rg-leostream-poc`
-4. **Register the Gateway** under *Setup > Gateways*:
-   * Address: the Gateway public IP or FQDN
-   * Private address: `10.50.1.10`
-5. **Create a protocol plan** that uses RDP through the Gateway.
-
-Steps 1–5 are the full scope of this PoC. If you added a desktop in step 8,
-continue:
-
-6. **Create a pool** under *Configuration > Pools* containing that desktop.
-7. **Create a policy** that offers the pool, and assign it in
-   *Configuration > Assignments*.
-
----
-
-## 10. Validate
+## 8. Validate
 
 ```powershell
 ./Test-LeostreamPoC.ps1
 ```
 
-See [validation.md](validation.md) for the full list of checks and the manual
-end-to-end test.
+See [validation.md](validation.md) for what each check means and for the manual
+tests the script cannot perform.
 
----
+## 9. Adding a desktop later (optional)
 
-## 11. Tear down
+This PoC deploys none. To exercise the full brokering path:
 
-```powershell
-./Remove-LeostreamPoC.ps1
-```
+1. Create a Windows 11 VM in `snet-leostream` with no public IP.
+2. Install the Leostream Agent on it, pointing at the Broker on `10.50.1.10`.
+3. In the Broker UI, create a pool containing the VM, a policy that offers it,
+   and an assignment that maps your user to that policy.
+4. Connect to the Gateway's public address and sign in as that user.
 
-Deletes the resource group and the Broker's role assignments. Use
-`-KeepResourceGroup` to keep the empty resource group, and `-Force` to skip the
-confirmation prompt.
+Bear in mind the VM will be in the same subnet as the Broker and Gateway, and
+`nsg-leostream` allows SSH and HTTPS inbound to the whole subnet from
+`AllowedClientCidrs` — so give the desktop no public IP, and keep the CIDR tight.
+
+## Common failures
+
+| Error | Cause | Fix |
+|---|---|---|
+| `SSH public key not found` | Wrong `SshPublicKeyPath` | Generate the key or fix the path |
+| `SkuNotAvailable` | VM size not offered in the region | Change `Size` or `Location` |
+| `OperationNotAllowed ... quota` | Not enough vCPU quota | Request an increase or use smaller sizes |
+| `AuthorizationFailed` on role assignment | Missing User Access Administrator | Get the role, or ask someone who has it to run step 4 |
+| RunCommand times out | Guest agent not ready yet | Wait a few minutes after VM creation, then retry |
+| Installer download fails in the VM | URL expired or needs authentication | Generate a fresh pre-signed HTTPS URL |
+| SSH connection hangs | Your IP is not in `AllowedClientCidrs` | Add it and re-run `Deploy-LeostreamPoC.ps1` |

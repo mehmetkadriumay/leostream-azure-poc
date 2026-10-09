@@ -1,145 +1,116 @@
 # Architecture
 
-This proof of concept deploys a minimal but realistic Leostream Platform 26
-environment on Microsoft Azure. It is designed for evaluation and demonstration,
-not for production use.
+## Design goal
 
-## Design principles
-
-| Principle | How it is applied |
-|---|---|
-| Separation of roles | The Connection Broker and the Leostream Gateway run on **separate virtual machines**. |
-| Minimal exposure | Only `leo-gateway-01` has a public IP address, and only TCP/443 is published. |
-| Private management | The Broker is reachable only through Azure Bastion or from inside the VNet. Any desktops added later inherit the same posture. |
-| No long-lived secrets | The Broker uses a **system-assigned managed identity** for Azure integration; the Linux VMs use SSH keys only. |
-| Repeatability | All infrastructure is described in `config/poc.config.psd1` and created by idempotent PowerShell scripts. |
+The smallest topology that still demonstrates Leostream Platform 26 running on
+Azure with a real managed-identity integration. Two virtual machines, one subnet,
+one network security group. Every piece that is not needed to prove the concept
+has been left out.
 
 ## Topology
 
 ```mermaid
 flowchart TB
-    user([Remote user<br/>HTTPS 443])
+    user([Remote user])
+    admin([Administrator])
+    arm([Azure Resource Manager])
 
-    subgraph azure["Azure subscription - rg-leostream-poc"]
-        subgraph vnet["vnet-leostream-poc - 10.50.0.0/16"]
-            subgraph gwsub["snet-gateway - 10.50.1.0/24"]
-                gw["leo-gateway-01<br/>RHEL 9<br/>public IP + HTTPS"]
-            end
-            subgraph infrasub["snet-infrastructure - 10.50.2.0/24"]
-                broker["leo-broker-01<br/>RHEL 9 - private<br/>system-assigned identity"]
-            end
-            subgraph desksub["snet-desktop - 10.50.10.0/24"]
-                win["(empty)<br/>no desktops deployed<br/>rules pre-staged"]
-            end
-            subgraph bassub["AzureBastionSubnet - 10.50.20.0/26"]
-                bastion["Azure Bastion"]
+    subgraph rg["Resource group: rg-leostream-poc"]
+        subgraph vnet["vnet-leostream-poc · 10.50.0.0/16"]
+            subgraph sn["snet-leostream · 10.50.1.0/24 · nsg-leostream"]
+                gw["leo-gateway-01<br/>RHEL 9 · Standard_D2s_v5<br/>10.50.1.20 + public IP"]
+                broker["leo-broker-01<br/>RHEL 9 · Standard_D4s_v5<br/>10.50.1.10 · private only"]
             end
         end
-        arm["Azure Resource Manager<br/>VM control plane"]
     end
 
-    admin([Administrator])
-
-    user -->|443| gw
-    gw -->|443| broker
-    gw -.->|3389 when added| win
-    broker -.->|agent 443 when added| win
-    broker -->|managed identity| arm
-    admin --> bastion
-    bastion -->|SSH / RDP| gw
-    bastion -->|SSH| broker
+    user -->|TCP 443| gw
+    admin -->|TCP 22| gw
+    gw -->|TCP 443| broker
+    gw -->|SSH hop| broker
+    broker -->|system-assigned<br/>managed identity| arm
 ```
 
-Dotted edges are pre-authorised by NSG rules but carry no traffic today: this
-PoC deploys the Leostream control plane only.
+## Resources
 
-## Address plan
+| Resource | Name | Notes |
+|---|---|---|
+| Resource group | `rg-leostream-poc` | Tagged `project=leostream-poc`; the teardown script keys off this tag |
+| Virtual network | `vnet-leostream-poc` | `10.50.0.0/16` |
+| Subnet | `snet-leostream` | `10.50.1.0/24`, holds both VMs |
+| Network security group | `nsg-leostream` | Attached to the subnet |
+| Public IP | `pip-leo-gateway-01` | Standard SKU, static, Gateway only |
+| Virtual machine | `leo-broker-01` | RHEL 9, private, system-assigned managed identity |
+| Virtual machine | `leo-gateway-01` | RHEL 9, public IP |
 
-| Subnet | Name | CIDR | Usable | Purpose |
-|---|---|---|---|---|
-| Gateway | `snet-gateway` | `10.50.1.0/24` | 251 | Internet-facing Leostream Gateway |
-| Infrastructure | `snet-infrastructure` | `10.50.2.0/24` | 251 | Connection Broker and future supporting services |
-| Desktop | `snet-desktop` | `10.50.10.0/24` | 251 | Managed desktops — **created empty**, reserved for desktops added later |
-| Bastion | `AzureBastionSubnet` | `10.50.20.0/26` | 59 | Azure Bastion (name and `/26` minimum are mandated by Azure) |
+Broker and Gateway are separate VMs by design. `Deploy-LeostreamPoC.ps1` throws
+if the two names in config are identical, and `Test-LeostreamPoC.ps1` checks the
+same thing after the fact.
 
-VNet address space: `10.50.0.0/16`, which leaves room to add subnets (for
-example a gateway subnet for ExpressRoute or a dedicated database subnet)
-without re-addressing.
+## Network security
 
-## Virtual machines
+`nsg-leostream` carries exactly two explicit rules:
 
-| VM | Role | OS | Default size | IP | Public | Identity |
-|---|---|---|---|---|---|---|
-| `leo-broker-01` | Connection Broker (Leostream Platform 26) | RHEL 9 | `Standard_D4s_v5` | `10.50.2.10` | No | System-assigned managed identity |
-| `leo-gateway-01` | Leostream Gateway | RHEL 9 | `Standard_D2s_v5` | `10.50.1.10` | Yes (TCP/443) | None |
+| Priority | Name | Direction | Source | Destination | Port |
+|---|---|---|---|---|---|
+| 100 | `Allow-HTTPS-Inbound` | Inbound | `AllowedClientCidrs` | `10.50.1.0/24` | 443 |
+| 110 | `Allow-SSH-Inbound` | Inbound | `AllowedClientCidrs` | `10.50.1.0/24` | 22 |
 
-Static private IPs are used so the Gateway and Agent configurations are stable
-across restarts. Both VMs use `SecurityType = 'Standard'`; set `'TrustedLaunch'`
-in `poc.config.psd1` to enable secure boot and vTPM on the Gen2 RHEL images.
+Nothing else is required, because Azure's default rules already provide what is
+needed:
 
-### Desktops are intentionally out of scope
+| Priority | Default rule | Effect here |
+|---|---|---|
+| 65000 | `AllowVnetInBound` | Gateway reaches the Broker on 443 and 22 without an explicit rule |
+| 65001 | `AllowAzureLoadBalancerInBound` | Health probes |
+| 65500 | `DenyAllInBound` | Everything else from the internet is dropped |
 
-This PoC deploys **no desktops**. The scope is the Leostream control plane —
-Broker, Gateway, Bastion, networking and the Azure identity integration.
+The Broker has no public IP, so the two inbound rules only ever match traffic
+aimed at the Gateway.
 
-The consequence is that brokering itself is not demonstrated end to end: there is
-no Agent to register, no pool or policy to assign, no user session to establish,
-and no VM for the Broker's managed identity to start or stop. The identity and
-its role assignment are still created and validated, but only their *existence
-and scope* are verified, not their effect.
-
-To close that gap, create a Windows VM in `snet-desktop` and run:
-
-```powershell
-./Install-LeostreamAgent.ps1 -VMName <name> -InstallerUri 'https://<portal>/LeostreamAgent.msi'
-```
-
-`nsg-desktop` already permits RDP from `snet-gateway` and `AzureBastionSubnet`
-and Agent traffic from `snet-infrastructure`, so no network changes are needed.
-Note that Windows 11 marketplace images are Gen2 and require **Trusted Launch**
-(secure boot and vTPM) when you create them.
-
-> **Broker and Gateway must stay separate.** `Deploy-LeostreamPoC.ps1` and
-> `Test-LeostreamPoC.ps1` both fail if the two VM names are ever made identical.
+> **Note:** these rules are only as safe as `AllowedClientCidrs`. The shipped
+> default of `0.0.0.0/0` exposes both HTTPS *and* SSH to the entire internet.
+> Narrow it to your own egress IP before deploying.
 
 ## Traffic flows
 
-| # | Source | Destination | Port | Purpose |
-|---|---|---|---|---|
-| 1 | Internet (`AllowedClientCidrs`) | `leo-gateway-01` | TCP 443 | User login page and tunnelled display protocol |
-| 2 | `snet-gateway` | `leo-broker-01` | TCP 443 | Gateway to Broker web services |
-| 3 | `snet-gateway` | `snet-desktop` | TCP 3389 | RDP proxied to the desktop — *pre-authorised, unused* |
-| 4 | `snet-infrastructure` | `snet-desktop` | TCP 443 / 8080 | Broker to Leostream Agent — *pre-authorised, unused* |
-| 5 | `snet-desktop` | `leo-broker-01` | TCP 443 | Agent check-in and status — *pre-authorised, unused* |
-| 6 | `AzureBastionSubnet` | all VM subnets | TCP 22 / 3389 | Administrative access |
-| 7 | `leo-broker-01` | Azure Resource Manager | TCP 443 | VM discovery and power control via managed identity |
+| Flow | Path | Port |
+|---|---|---|
+| User → Gateway | Internet → public IP | 443 |
+| Gateway → Broker | Inside the VNet | 443 |
+| Administrator → Gateway | Internet → public IP | 22 |
+| Administrator → Broker | SSH jump through the Gateway | 22 |
+| Administrator → Broker UI | SSH local forward through the Gateway | 443 → localhost:8443 |
+| Broker → Azure | Outbound HTTPS to Azure Resource Manager | 443 |
+| Both VMs → Azure control plane | RunCommand via the guest agent, outbound only | 443 |
 
-Every NSG ends with an explicit `Deny-All-Inbound` rule at priority 4000, after
-the specific allow rules.
+## Identity
 
-## Identity model
+`leo-broker-01` is created with a system-assigned managed identity
+(`New-AzVMConfig -IdentityType SystemAssigned`).
+`Configure-LeostreamAzureRBAC.ps1` grants that identity **Virtual Machine
+Contributor** on the resource group, which is what the Broker needs to discover,
+start and stop VMs through its Azure center.
 
-The Broker authenticates to Azure with its **system-assigned managed identity**
-rather than a service principal with a client secret:
+No service principal is created and no secret is stored anywhere — in this
+repository, in the VM, or in the Broker configuration.
 
-1. `Deploy-LeostreamPoC.ps1` creates `leo-broker-01` with `-IdentityType SystemAssigned`.
-2. `Configure-LeostreamAzureRBAC.ps1` assigns **Virtual Machine Contributor**
-   (configurable) at resource group scope to that identity.
-3. In the Broker UI you create an Azure center that authenticates with the
-   instance metadata endpoint — no secret is ever entered or stored.
+## Deliberate omissions
 
-Role assignments are removed again by `Remove-LeostreamPoC.ps1`, so no orphaned
-assignments remain after teardown.
+| Not deployed | Why | Consequence |
+|---|---|---|
+| Azure Bastion | Roughly doubles the cost of the PoC and takes 10–20 minutes to provision | Administration is over SSH to the Gateway's public IP |
+| Separate subnets per tier | Two VMs do not need network segmentation to prove the concept | Gateway and Broker are not isolated from each other |
+| Desktop VMs | The largest cost item, and not needed to prove the Azure integration | Pools, policies and end-to-end sessions are not exercised |
+| Explicit deny rules | Azure already denies inbound by default at 65500 | None — the effective behaviour is identical |
+| Trusted Launch / vTPM | Extra configuration surface for no PoC benefit | VMs use the standard security type |
 
-## What this PoC deliberately omits
+## What a production design would change
 
-* High availability (single Broker, single Gateway, no load balancer)
-* An external or replicated database
-* Managed desktops of any kind, and therefore Active Directory / Entra ID domain
-  join, pools, policies and assignments
-* Trusted TLS certificates (the Gateway starts with a self-signed certificate)
-* Backup, patch management, monitoring and cost governance
-* Private Link / Private DNS for the Azure control-plane calls
-
-See [installation.md](installation.md) for deployment and
-[validation.md](validation.md) for the acceptance checks.
+* Gateway and Broker in separate subnets, each with its own NSG.
+* Azure Bastion or a VPN gateway for administration; no public SSH.
+* Broker and Gateway deployed as HA pairs behind a load balancer.
+* A trusted TLS certificate and a real DNS name on the Gateway.
+* Desktops in a dedicated subnet with no outbound internet access.
+* Diagnostic settings, Defender for Cloud and Azure Monitor across the board.
+* A narrower custom role for the Broker identity than Virtual Machine Contributor.

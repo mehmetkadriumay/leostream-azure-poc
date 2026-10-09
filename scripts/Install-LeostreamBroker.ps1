@@ -162,5 +162,7 @@ if ($PSCmdlet.ShouldProcess($spec.Name, 'Install Leostream Platform 26')) {
 
 Write-Host ''
 Write-Host "Broker private address: https://$($spec.PrivateIp)/" -ForegroundColor Green
-Write-Host 'Reach it from the Windows desktop or a jump host via Azure Bastion.' -ForegroundColor Green
+Write-Host 'Reach it by tunnelling through the Gateway:' -ForegroundColor Green
+Write-Host "  ssh -L 8443:$($spec.PrivateIp):443 $($config.Admin.LinuxUsername)@<gateway-public-ip>" -ForegroundColor Green
+Write-Host '  then browse to https://localhost:8443/' -ForegroundColor Green
 Write-Host 'Default Leostream administrator account: admin / leo (change it immediately).' -ForegroundColor Yellow

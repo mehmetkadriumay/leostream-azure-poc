@@ -9,23 +9,18 @@
     Read-only checks covering infrastructure and the Leostream layer:
 
       Infrastructure
-        * resource group, virtual network and the four subnets with the
-          expected address prefixes
-        * NSGs attached, Gateway HTTPS allowed, Broker without a public IP
-          address
+        * resource group, virtual network and the single subnet with the
+          expected address prefix
+        * NSG attached, HTTPS and SSH inbound allowed, Broker without a
+          public IP address
         * Broker and Gateway are distinct virtual machines
         * both VMs running
         * Broker has a system-assigned managed identity with a role assignment
-        * Azure Bastion present (when enabled)
 
       Services
-        * Gateway TCP/443 reachable from the current machine
+        * Gateway TCP/443 and TCP/22 reachable from the current machine
         * Broker HTTPS reachable from inside the VNet (via RunCommand on the
           Gateway)
-
-      Desktops
-        * this PoC deploys none; any VM added to the Desktop subnet is
-          inventoried and checked for public IP exposure
 
 .PARAMETER SkipRemoteChecks
     Only perform Azure control-plane checks (no RunCommand invocations).
@@ -94,28 +89,22 @@ $vnet = Get-AzVirtualNetwork -ResourceGroupName $rgName -Name $config.Network.VN
 if ($vnet) {
     Add-Result -Area 'Network' -Check 'Virtual network exists' -Status Pass -Detail ($vnet.AddressSpace.AddressPrefixes -join ', ')
 
-    foreach ($key in @('Gateway', 'Infrastructure', 'Desktop', 'Bastion')) {
-        $expected = $config.Network.Subnets[$key]
-        $subnet = $vnet.Subnets | Where-Object { $_.Name -eq $expected.Name }
-        if (-not $subnet) {
-            Add-Result -Area 'Network' -Check "Subnet $($expected.Name)" -Status Fail -Detail 'missing'
-            continue
-        }
-        if ($subnet.AddressPrefix -contains $expected.AddressPrefix) {
-            Add-Result -Area 'Network' -Check "Subnet $($expected.Name)" -Status Pass -Detail $expected.AddressPrefix
+    $subnet = $vnet.Subnets | Where-Object { $_.Name -eq $config.Network.SubnetName }
+    if (-not $subnet) {
+        Add-Result -Area 'Network' -Check "Subnet $($config.Network.SubnetName)" -Status Fail -Detail 'missing'
+    }
+    elseif ($subnet.AddressPrefix -contains $config.Network.SubnetPrefix) {
+        Add-Result -Area 'Network' -Check "Subnet $($config.Network.SubnetName)" -Status Pass -Detail $config.Network.SubnetPrefix
+
+        if ($subnet.NetworkSecurityGroup) {
+            Add-Result -Area 'Network' -Check 'NSG attached to the subnet' -Status Pass
         }
         else {
-            Add-Result -Area 'Network' -Check "Subnet $($expected.Name)" -Status Fail -Detail "expected $($expected.AddressPrefix), found $($subnet.AddressPrefix -join ',')"
+            Add-Result -Area 'Network' -Check 'NSG attached to the subnet' -Status Fail -Detail 'no NSG attached'
         }
-
-        if ($key -ne 'Bastion') {
-            if ($subnet.NetworkSecurityGroup) {
-                Add-Result -Area 'Network' -Check "NSG on $($expected.Name)" -Status Pass
-            }
-            else {
-                Add-Result -Area 'Network' -Check "NSG on $($expected.Name)" -Status Fail -Detail 'no NSG attached'
-            }
-        }
+    }
+    else {
+        Add-Result -Area 'Network' -Check "Subnet $($config.Network.SubnetName)" -Status Fail -Detail "expected $($config.Network.SubnetPrefix), found $($subnet.AddressPrefix -join ',')"
     }
 }
 else {
@@ -123,17 +112,22 @@ else {
 }
 
 # --- NSG rules ----------------------------------------------------------------
-$gwNsg = Get-AzNetworkSecurityGroup -ResourceGroupName $rgName -Name $config.Network.Subnets.Gateway.NsgName -ErrorAction SilentlyContinue
-if ($gwNsg) {
-    $httpsRule = $gwNsg.SecurityRules | Where-Object {
-        $_.Direction -eq 'Inbound' -and $_.Access -eq 'Allow' -and ($_.DestinationPortRange -contains '443')
+$nsg = Get-AzNetworkSecurityGroup -ResourceGroupName $rgName -Name $config.Network.NsgName -ErrorAction SilentlyContinue
+if ($nsg) {
+    foreach ($port in @("$($config.Ports.Https)", "$($config.Ports.Ssh)")) {
+        $rule = @($nsg.SecurityRules | Where-Object {
+            $_.Direction -eq 'Inbound' -and $_.Access -eq 'Allow' -and ($_.DestinationPortRange -contains $port)
+        })
+        if ($rule.Count -gt 0) {
+            Add-Result -Area 'Security' -Check "Inbound TCP/$port allowed" -Status Pass -Detail ($rule.Name -join ', ')
+        }
+        else {
+            Add-Result -Area 'Security' -Check "Inbound TCP/$port allowed" -Status Fail
+        }
     }
-    if ($httpsRule) {
-        Add-Result -Area 'Security' -Check 'Gateway HTTPS inbound allowed' -Status Pass -Detail ($httpsRule.Name -join ', ')
-    }
-    else {
-        Add-Result -Area 'Security' -Check 'Gateway HTTPS inbound allowed' -Status Fail
-    }
+}
+else {
+    Add-Result -Area 'Security' -Check "NSG $($config.Network.NsgName) exists" -Status Fail
 }
 
 # --- virtual machines ---------------------------------------------------------
@@ -206,29 +200,26 @@ if ($brokerVm) {
     }
 }
 
-# --- bastion ------------------------------------------------------------------
-if ($config.Bastion.Enabled) {
-    $bastion = Get-AzBastion -ResourceGroupName $rgName -Name $config.Bastion.Name -ErrorAction SilentlyContinue
-    if ($bastion) {
-        Add-Result -Area 'Infrastructure' -Check 'Azure Bastion deployed' -Status Pass -Detail $bastion.Sku.Name
-    }
-    else {
-        Add-Result -Area 'Infrastructure' -Check 'Azure Bastion deployed' -Status Warn -Detail 'not found (deployed with -SkipBastion?)'
-    }
-}
-
 # --- gateway reachability -----------------------------------------------------
 $pip = Get-AzPublicIpAddress -ResourceGroupName $rgName -Name $gatewaySpec.PublicIpName -ErrorAction SilentlyContinue
 if ($pip -and $pip.IpAddress -and $pip.IpAddress -ne 'Not Assigned') {
     Add-Result -Area 'Network' -Check 'Gateway public IP assigned' -Status Pass -Detail $pip.IpAddress
 
     if (-not $SkipRemoteChecks) {
-        $tcp = Test-NetConnection -ComputerName $pip.IpAddress -Port $config.Ports.LeostreamGatewayHttps -WarningAction SilentlyContinue
+        $tcp = Test-NetConnection -ComputerName $pip.IpAddress -Port $config.Ports.Https -WarningAction SilentlyContinue
         if ($tcp.TcpTestSucceeded) {
             Add-Result -Area 'Service' -Check 'Gateway TCP/443 reachable' -Status Pass -Detail $pip.IpAddress
         }
         else {
             Add-Result -Area 'Service' -Check 'Gateway TCP/443 reachable' -Status Warn -Detail 'no response - Gateway software may not be installed yet, or your IP is not in AllowedClientCidrs'
+        }
+
+        $ssh = Test-NetConnection -ComputerName $pip.IpAddress -Port $config.Ports.Ssh -WarningAction SilentlyContinue
+        if ($ssh.TcpTestSucceeded) {
+            Add-Result -Area 'Service' -Check 'Gateway TCP/22 reachable' -Status Pass -Detail 'administrative SSH path is open'
+        }
+        else {
+            Add-Result -Area 'Service' -Check 'Gateway TCP/22 reachable' -Status Warn -Detail 'no response - your IP is probably not in AllowedClientCidrs'
         }
     }
 }
@@ -257,26 +248,6 @@ if (-not $SkipRemoteChecks) {
         Add-Result -Area 'Service' -Check 'Broker HTTPS reachable from Gateway' -Status Skip -Detail $_.Exception.Message
     }
 
-}
-
-# --- desktops -----------------------------------------------------------------
-# This PoC deploys no desktops. Report whatever has been added to the Desktop
-# subnet since deployment so the inventory is visible either way.
-$desktopSubnetName = $config.Network.Subnets.Desktop.Name
-$desktopNics = @(Get-AzNetworkInterface -ResourceGroupName $rgName -ErrorAction SilentlyContinue |
-    Where-Object { $_.IpConfigurations.Subnet.Id -match "/subnets/$desktopSubnetName$" })
-
-if ($desktopNics.Count -eq 0) {
-    Add-Result -Area 'Desktops' -Check 'Desktop inventory' -Status Skip -Detail 'no desktops deployed (expected for this PoC)'
-}
-else {
-    $exposed = @($desktopNics | Where-Object { $_.IpConfigurations.PublicIpAddress })
-    if ($exposed.Count -eq 0) {
-        Add-Result -Area 'Desktops' -Check 'Desktops have no public IP' -Status Pass -Detail "$($desktopNics.Count) found"
-    }
-    else {
-        Add-Result -Area 'Desktops' -Check 'Desktops have no public IP' -Status Fail -Detail "$($exposed.Count) exposed"
-    }
 }
 
 # --- summary ------------------------------------------------------------------

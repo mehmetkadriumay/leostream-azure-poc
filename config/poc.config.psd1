@@ -2,6 +2,8 @@
     # ---------------------------------------------------------------------
     # Leostream Platform 26 - Azure Proof of Concept configuration
     #
+    # Two virtual machines in one subnet. Nothing else.
+    #
     # This file contains NO secrets. Passwords, licence keys, serial numbers
     # and installer locations are supplied at run time (parameters, prompts,
     # environment variables or Azure Key Vault).
@@ -15,122 +17,80 @@
         Tags              = @{
             project     = 'leostream-poc'
             environment = 'poc'
-            owner       = 'platform-team'
             lifecycle   = 'temporary'
         }
     }
 
     Network = @{
-        VNetName      = 'vnet-leostream-poc'
-        AddressSpace  = '10.50.0.0/16'
+        VNetName     = 'vnet-leostream-poc'
+        AddressSpace = '10.50.0.0/16'
 
-        Subnets = @{
-            Gateway = @{
-                Name          = 'snet-gateway'
-                AddressPrefix = '10.50.1.0/24'
-                NsgName       = 'nsg-gateway'
-            }
-            Infrastructure = @{
-                Name          = 'snet-infrastructure'
-                AddressPrefix = '10.50.2.0/24'
-                NsgName       = 'nsg-infrastructure'
-            }
-            Desktop = @{
-                Name          = 'snet-desktop'
-                AddressPrefix = '10.50.10.0/24'
-                NsgName       = 'nsg-desktop'
-            }
-            Bastion = @{
-                # The name AzureBastionSubnet is mandated by Azure.
-                Name          = 'AzureBastionSubnet'
-                AddressPrefix = '10.50.20.0/26'
-                NsgName       = ''
-            }
-        }
+        # A single subnet holds both VMs. Azure's default rules already allow
+        # all traffic inside the virtual network, so the Gateway reaches the
+        # Broker without any explicit NSG rule.
+        SubnetName   = 'snet-leostream'
+        SubnetPrefix = '10.50.1.0/24'
+        NsgName      = 'nsg-leostream'
     }
 
-    Bastion = @{
-        Enabled        = $true
-        Name           = 'bastion-leostream-poc'
-        PublicIpName   = 'pip-bastion-leostream-poc'
-        Sku            = 'Basic'
-    }
-
-    # Source ranges allowed to reach the Gateway's public HTTPS endpoint.
-    # '*' is intentionally NOT the default - narrow this to your own egress IPs.
+    # Source ranges allowed to reach the Gateway's public IP on 443 (users)
+    # and 22 (you, for administration). Narrow this to your own egress IP.
     AllowedClientCidrs = @(
         '0.0.0.0/0'
     )
 
     VirtualMachines = @{
         Broker = @{
-            Name           = 'leo-broker-01'
-            Role           = 'Broker'
-            Size           = 'Standard_D4s_v5'
-            Subnet         = 'Infrastructure'
-            PrivateIp      = '10.50.2.10'
-            PublicIp       = $false
-            OsType         = 'Linux'
+            Name            = 'leo-broker-01'
+            Size            = 'Standard_D4s_v5'
+            PrivateIp       = '10.50.1.10'
+            PublicIp        = $false
             ManagedIdentity = $true
-            Image          = @{
+            Image           = @{
                 Publisher = 'RedHat'
                 Offer     = 'RHEL'
                 Sku       = '9-lvm-gen2'
                 Version   = 'latest'
             }
-            OsDiskSizeGb   = 128
-            OsDiskType     = 'Premium_LRS'
-            # 'Standard' or 'TrustedLaunch'
-            SecurityType   = 'Standard'
+            OsDiskSizeGb    = 128
+            OsDiskType      = 'Premium_LRS'
         }
 
         Gateway = @{
-            Name           = 'leo-gateway-01'
-            Role           = 'Gateway'
-            Size           = 'Standard_D2s_v5'
-            Subnet         = 'Gateway'
-            PrivateIp      = '10.50.1.10'
-            PublicIp       = $true
-            PublicIpName   = 'pip-leo-gateway-01'
-            DnsLabelPrefix = ''   # optional, must be globally unique if set
-            OsType         = 'Linux'
+            Name            = 'leo-gateway-01'
+            Size            = 'Standard_D2s_v5'
+            PrivateIp       = '10.50.1.20'
+            PublicIp        = $true
+            PublicIpName    = 'pip-leo-gateway-01'
+            DnsLabelPrefix  = ''   # optional, must be globally unique if set
             ManagedIdentity = $false
-            Image          = @{
+            Image           = @{
                 Publisher = 'RedHat'
                 Offer     = 'RHEL'
                 Sku       = '9-lvm-gen2'
                 Version   = 'latest'
             }
-            OsDiskSizeGb   = 64
-            OsDiskType     = 'Premium_LRS'
-            SecurityType   = 'Standard'
+            OsDiskSizeGb    = 64
+            OsDiskType      = 'Premium_LRS'
         }
-
-        # This PoC deploys no desktops. The Desktop subnet and nsg-desktop are
-        # still created, so desktops can be added later - either provisioned by
-        # the Broker through its managed identity, or built separately and
-        # registered with Install-LeostreamAgent.ps1 -VMName <name>.
     }
 
     Admin = @{
-        LinuxUsername   = 'leoadmin'
-        # Path to an existing SSH public key used for the RHEL VMs.
+        LinuxUsername    = 'leoadmin'
+        # Path to an existing SSH public key used for both RHEL VMs.
         SshPublicKeyPath = '~/.ssh/id_rsa.pub'
     }
 
     Rbac = @{
         # Role granted to the Broker's system-assigned managed identity so it
-        # can discover, start, stop and (optionally) provision desktop VMs.
+        # can discover, start and stop VMs in the resource group.
         RoleDefinitionName = 'Virtual Machine Contributor'
         # Scope: 'ResourceGroup' or 'Subscription'
         Scope              = 'ResourceGroup'
     }
 
     Ports = @{
-        LeostreamGatewayHttps = 443
-        LeostreamBrokerHttps  = 443
-        # Gateway -> Broker / desktops
-        Rdp                   = 3389
-        Ssh                   = 22
+        Https = 443
+        Ssh   = 22
     }
 }
