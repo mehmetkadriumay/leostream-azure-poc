@@ -13,7 +13,7 @@ running inside the VMs.
 | Azure rights | **Contributor**. User Access Administrator is *not* needed — no role assignments are created |
 | Quota | ~6 vCPUs of the `Dsv5` family in your region |
 | SSH key | Either reuse `~/.ssh/id_rsa.pub`, which is the config default, or generate `ssh-keygen -t ed25519 -C "leostream-poc" -f $HOME\.ssh\leostream_poc` **and** point `Admin.SshPublicKeyPath` at it |
-| Leostream media | HTTPS download URLs for the Platform 26 and Gateway installers, plus an evaluation licence key |
+| Leostream media | Nothing to download by hand. The packages come from the public URLs in `poc.config.psd1`. An evaluation licence key is still needed |
 | Your egress IP | `(Invoke-RestMethod https://api.ipify.org?format=json).ip` |
 
 ## 1. Configure
@@ -122,19 +122,27 @@ need for administration. Keep that output.
 ## 4. Install Leostream Platform 26 on the Broker
 
 ```powershell
-./Install-LeostreamBroker.ps1 -InstallerUri 'https://<portal>/<platform-26-installer>'
+./Install-LeostreamBroker.ps1
+```
+
+The package version comes from `Leostream.BrokerInstallerUri` in
+`poc.config.psd1`. The script prints the URL it is using before it starts. To
+pin a different build for one run:
+
+```powershell
+./Install-LeostreamBroker.ps1 -InstallerUri 'https://downloads.leostream.com/leostream-broker-26.1.6-1.x86_64.rpm'
 ```
 
 The script runs through the Azure RunCommand extension, so the Broker needs no
 inbound connectivity. Inside the VM it updates RHEL 9, installs prerequisites,
-sets the hostname, opens 443/tcp in firewalld, downloads and runs the installer,
-and optionally applies a licence key.
+sets the hostname, opens 443/tcp in firewalld, enables EPEL, downloads and
+installs the package, and optionally applies a licence key.
 
 To supply the licence non-interactively:
 
 ```powershell
 $licence = Read-Host -AsSecureString 'Leostream licence key'
-./Install-LeostreamBroker.ps1 -InstallerUri 'https://...' -LicenseKey $licence
+./Install-LeostreamBroker.ps1 -LicenseKey $licence
 ```
 
 Allow 10–20 minutes. RunCommand streams the output back when the script finishes,
@@ -143,12 +151,16 @@ not as it runs, so a long silence is normal.
 ## 5. Install the Leostream Gateway
 
 ```powershell
-./Install-LeostreamGateway.ps1 -InstallerUri 'https://<portal>/<gateway-installer>'
+./Install-LeostreamGateway.ps1
 ```
 
 This configures firewalld (443 and 22 open), applies the kernel settings the
-Gateway needs, runs the installer, and records the Broker's private address so
-the Gateway knows where to forward.
+Gateway needs, enables EPEL, installs the package, and records the Broker's
+private address so the Gateway knows where to forward. The version comes from
+`Leostream.GatewayInstallerUri`, overridable with `-InstallerUri`.
+
+Expect this one to take longer than the Broker: the Gateway pulls in roughly
+400 dependency packages, around 230 MB.
 
 The host firewall deliberately leaves SSH open: `nsg-leostream` is the single
 place that restricts who can reach it, and since the Gateway is your only way in,
@@ -246,5 +258,7 @@ Bear in mind the VM will be in the same subnet as the Broker and Gateway, and
 | `OperationNotAllowed ... quota` | Not enough vCPU quota | Request an increase or use smaller sizes |
 | `Forbidden` / `AuthorizationFailed` creating a role assignment | You are granting the Broker identity a role, which needs User Access Administrator or Owner. Many subscriptions also apply an ABAC condition restricting *which* roles you may assign | Not needed for this PoC — no role assignment is required. Only relevant when adding desktops; ask a subscription Owner |
 | RunCommand times out | Guest agent not ready yet | Wait a few minutes after VM creation, then retry |
-| Installer download fails in the VM | URL expired or needs authentication | Generate a fresh pre-signed HTTPS URL |
+| Installer download fails in the VM | The pinned version was withdrawn, or a custom URL expired | Verify with `Invoke-WebRequest -Method Head <uri>`, then pass a current one via `-InstallerUri` |
+| `No match for argument: ./leostream-...` | dnf only treats a local file as a package when the name ends in `.rpm` | The scripts preserve the upstream file name, so this only appears with a URL that has no file component |
+| `nothing provides libguac` / `openvpn` / `certbot` / `mod_perl` | EPEL missing — these are not in the Azure RHUI repositories | The scripts enable EPEL automatically. By hand: `dnf -y install epel-release` |
 | SSH connection hangs | Your IP is not in `AllowedClientCidrs` | Add it and re-run `Deploy-LeostreamPoC.ps1` |

@@ -4,9 +4,9 @@
     #
     # Two virtual machines in one subnet. Nothing else.
     #
-    # This file contains NO secrets. Passwords, licence keys, serial numbers
-    # and installer locations are supplied at run time (parameters, prompts,
-    # environment variables or Azure Key Vault).
+    # This file contains NO secrets. Passwords, licence keys and serial
+    # numbers are supplied at run time (parameters, prompts, environment
+    # variables or Azure Key Vault).
     # ---------------------------------------------------------------------
 
     Azure = @{
@@ -19,6 +19,17 @@
             environment = 'poc'
             lifecycle   = 'temporary'
         }
+    }
+
+    Leostream = @{
+        # Public download locations for the installer packages. These are URLs,
+        # not credentials - no serial number or licence key is involved, and no
+        # installer is committed to this repository.
+        #
+        # Pin the versions you intend to test. Override at run time with the
+        # -InstallerUri parameter on either install script.
+        BrokerInstallerUri  = 'https://downloads.leostream.com/leostream-broker-26.1.6-1.x86_64.rpm'
+        GatewayInstallerUri = 'https://downloads.leostream.com/leostream-gateway-2026.1.1-2.x86_64.rpm'
     }
 
     Network = @{

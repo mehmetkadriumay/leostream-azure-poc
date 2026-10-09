@@ -13,20 +13,22 @@
     The script:
       * updates the OS and installs prerequisites (firewalld, chrony, policycoreutils)
       * opens 443/tcp in firewalld
-      * optionally registers the system with Red Hat Subscription Manager
-      * installs Leostream Platform 26 from a repository URL or an installer
-        URL that YOU provide at run time
+      * enables EPEL, which supplies dependencies the Leostream package needs
+        and which is not available in the Azure RHUI repositories
+      * installs Leostream Platform 26 from an RPM or shell installer URL
 
     No Leostream RPMs, licence keys or serial numbers are stored in this
-    repository. Supply them with -InstallerUri / -LicenseKey (SecureString) or
-    complete licensing through the Broker web interface after installation.
+    repository. The installer URL in poc.config.psd1 is a public download
+    location, not a credential. Supply a licence with -LicenseKey
+    (SecureString) or complete licensing through the Broker web interface.
 
 .PARAMETER ConfigPath
     Path to poc.config.psd1.
 
 .PARAMETER InstallerUri
-    HTTPS URI of the Leostream Platform 26 installer or YUM repository file.
-    Obtain this from your Leostream portal / support contact.
+    HTTPS URI of the Leostream Platform 26 installer. Defaults to
+    Leostream.BrokerInstallerUri in poc.config.psd1. Both a .rpm package and a
+    shell installer are supported; the script detects which it received.
 
 .PARAMETER LicenseKey
     Optional SecureString licence key. If omitted, license the Broker through
@@ -36,13 +38,15 @@
     Skip 'dnf update' to shorten the run.
 
 .EXAMPLE
-    ./Install-LeostreamBroker.ps1 -InstallerUri 'https://<your-portal>/leostream-platform-26.sh'
+    ./Install-LeostreamBroker.ps1
+
+.EXAMPLE
+    ./Install-LeostreamBroker.ps1 -InstallerUri 'https://downloads.leostream.com/leostream-broker-26.1.6-1.x86_64.rpm'
 #>
 [CmdletBinding(SupportsShouldProcess = $true)]
 param(
     [string] $ConfigPath = (Join-Path (Join-Path $PSScriptRoot '..') (Join-Path 'config' 'poc.config.psd1')),
 
-    [Parameter(Mandatory)]
     [ValidatePattern('^https://')]
     [string] $InstallerUri,
 
@@ -57,6 +61,14 @@ $ErrorActionPreference = 'Stop'
 $config = Import-PowerShellDataFile -Path (Resolve-Path $ConfigPath).Path
 $rgName = $config.Azure.ResourceGroupName
 $spec   = $config.VirtualMachines.Broker
+
+if (-not $InstallerUri) {
+    $InstallerUri = $config.Leostream.BrokerInstallerUri
+}
+if (-not $InstallerUri) {
+    throw 'No installer URI. Set Leostream.BrokerInstallerUri in poc.config.psd1 or pass -InstallerUri.'
+}
+Write-Host "==> Installer: $InstallerUri" -ForegroundColor Cyan
 
 if (-not (Get-AzContext -ErrorAction SilentlyContinue)) {
     Connect-AzAccount | Out-Null
@@ -95,23 +107,45 @@ firewall-cmd --reload
 echo '--- setting hostname ---'
 hostnamectl set-hostname '__VM_NAME__'
 
+echo '--- enabling EPEL ---'
+# The Leostream packages depend on software that is not in the Azure RHUI
+# repositories. CodeReady Builder is already enabled on the Azure RHEL image.
+if ! dnf -y install epel-release 2>/dev/null; then
+    dnf -y install https://dl.fedoraproject.org/pub/epel/epel-release-latest-9.noarch.rpm
+fi
+
 INSTALLER_URI='__INSTALLER_URI__'
 WORKDIR=$(mktemp -d)
 cd "$WORKDIR"
 
-echo '--- downloading Leostream Platform 26 installer ---'
-curl -fsSL -o leostream-installer "$INSTALLER_URI"
-chmod +x leostream-installer
+# Keep the upstream file name. dnf only treats a local path as a package when
+# it ends in .rpm - otherwise it reads it as a package name and fails with
+# "No match for argument". Drop the query string of a pre-signed URL, then the
+# scheme and host, and fall back if what is left has no file component.
+INSTALLER_PATH="${INSTALLER_URI%%\?*}"
+INSTALLER_PATH="${INSTALLER_PATH#*://}"
+INSTALLER_FILE=''
+case "$INSTALLER_PATH" in
+    */)  : ;;
+    */*) INSTALLER_FILE="${INSTALLER_PATH##*/}" ;;
+esac
+[ -n "$INSTALLER_FILE" ] || INSTALLER_FILE='leostream-installer'
+
+echo "--- downloading Leostream Platform 26 installer ($INSTALLER_FILE) ---"
+curl -fsSL -o "$INSTALLER_FILE" "$INSTALLER_URI"
 
 echo '--- running installer ---'
-if head -c 2 leostream-installer | grep -q '#!' ; then
-    ./leostream-installer
+if head -c 2 "$INSTALLER_FILE" | grep -q '#!' ; then
+    chmod +x "$INSTALLER_FILE"
+    "./$INSTALLER_FILE"
 else
-    dnf -y install ./leostream-installer
+    dnf -y install "./$INSTALLER_FILE"
 fi
 
 echo '--- enabling Leostream services ---'
-for svc in leostream httpd mariadb; do
+# postgresql is what the Platform 26 package pulls in; mariadb and nginx are
+# listed for older builds. Missing units are skipped.
+for svc in postgresql mariadb httpd nginx leostream; do
     if systemctl list-unit-files | grep -q "^${svc}"; then
         systemctl enable --now "$svc" || echo "could not enable $svc"
     fi

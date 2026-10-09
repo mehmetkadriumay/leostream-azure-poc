@@ -107,7 +107,7 @@ leostream-azure-poc/
 | Azure permissions | **Contributor** on the subscription or resource group. User Access Administrator is *not* needed — no role assignments are created |
 | Azure quota | ~6 vCPUs of the `Dsv5` family in the target region |
 | SSH key pair | For the two RHEL 9 VMs |
-| Leostream | Evaluation licence plus HTTPS download URLs for the Platform and Gateway installers |
+| Leostream | An evaluation licence. The installer packages download automatically from the public URLs in `poc.config.psd1` |
 
 ```powershell
 Install-Module Az -Scope CurrentUser -Repository PSGallery -Force
@@ -152,9 +152,10 @@ cd scripts
 ./Deploy-LeostreamPoC.ps1 -WhatIf
 ./Deploy-LeostreamPoC.ps1 -Verbose
 
-# 4. Install the Leostream software (URLs come from your Leostream portal)
-./Install-LeostreamBroker.ps1  -InstallerUri 'https://<portal>/<platform-26-installer>'
-./Install-LeostreamGateway.ps1 -InstallerUri 'https://<portal>/<gateway-installer>'
+# 4. Install the Leostream software. Versions come from poc.config.psd1;
+#    override with -InstallerUri to test a different build.
+./Install-LeostreamBroker.ps1
+./Install-LeostreamGateway.ps1
 
 # 5. Validate
 ./Test-LeostreamPoC.ps1
@@ -176,6 +177,8 @@ Everything is centralised in [`config/poc.config.psd1`](config/poc.config.psd1).
 | `AllowedClientCidrs` | `0.0.0.0/0` | **Always** — narrow to your egress IP |
 | `VirtualMachines.*.Size` | `D4s_v5` / `D2s_v5` | Cost or performance tuning |
 | `Admin.SshPublicKeyPath` | `~/.ssh/id_rsa.pub` | Your key lives elsewhere |
+| `Leostream.BrokerInstallerUri` | Platform `26.1.6-1` | Testing a different Broker build |
+| `Leostream.GatewayInstallerUri` | Gateway `2026.1.1-2` | Testing a different Gateway build |
 
 The deployment script prints a warning if `AllowedClientCidrs` still contains
 `0.0.0.0/0`. That default leaves SSH open to the internet — change it.
@@ -185,7 +188,8 @@ The deployment script prints a warning if `AllowedClientCidrs` still contains
 * Linux credentials — password auth is disabled, SSH public key only
 * Leostream licence keys and serial numbers — passed as a `SecureString` or
   entered in the Broker UI
-* Leostream RPMs — downloaded at run time from URLs you supply
+* Leostream RPMs — never committed; downloaded at run time from the public
+  URLs in `poc.config.psd1`, which are version pointers, not credentials
 * Azure credentials and service-principal secrets — the Broker uses a
   system-assigned managed identity
 
@@ -217,8 +221,24 @@ never needs inbound connectivity from the internet.
 
 | Script | Does |
 |---|---|
-| `Install-LeostreamBroker.ps1` | Updates RHEL 9, installs prerequisites, opens 443/tcp, sets hostname, runs the Platform 26 installer, optionally applies a licence key |
-| `Install-LeostreamGateway.ps1` | Configures firewalld (443 and 22 open, with `nsg-leostream` restricting the source), applies gateway kernel settings, runs the Gateway installer, records the Broker address |
+| `Install-LeostreamBroker.ps1` | Updates RHEL 9, installs prerequisites, opens 443/tcp, sets hostname, enables EPEL, installs Platform 26, optionally applies a licence key |
+| `Install-LeostreamGateway.ps1` | Configures firewalld (443 and 22 open, with `nsg-leostream` restricting the source), applies gateway kernel settings, enables EPEL, installs the Gateway, records the Broker address |
+
+Both default to the URLs in `Leostream.*InstallerUri`. Pass `-InstallerUri` to
+pin a different build:
+
+```powershell
+./Install-LeostreamBroker.ps1 -InstallerUri 'https://downloads.leostream.com/leostream-broker-26.1.6-1.x86_64.rpm'
+```
+
+A `.rpm` and a shell installer are both accepted — the script inspects the
+downloaded file and either runs it or hands it to `dnf`.
+
+**Why EPEL.** The Leostream packages depend on software Red Hat does not ship
+in the Azure RHUI repositories — the Gateway alone needs `libguac`, `openvpn`,
+`certbot`, `mod_perl` and `libvncserver`. Both scripts enable EPEL first, which
+resolves every dependency. CodeReady Builder is already enabled on the Azure
+RHEL 9 image.
 
 Full walkthrough: [docs/installation.md](docs/installation.md).
 
@@ -435,7 +455,9 @@ Manual end-to-end and negative tests: [docs/validation.md](docs/validation.md).
 | `New-AzVM: ... SkuNotAvailable` | VM size unavailable in the region | Change `VirtualMachines.*.Size` or `Azure.Location` |
 | `OperationNotAllowed ... quota` | Insufficient vCPU quota | Request a quota increase or use smaller sizes |
 | `Invoke-AzVMRunCommand` times out | VM agent not ready | Wait a few minutes after VM creation and retry |
-| Installer download fails inside the VM | URL expired, needs auth, or is not HTTPS | Use a fresh pre-signed HTTPS URL |
+| Installer download fails inside the VM | The pinned version was withdrawn, or a custom URL expired or needs auth | Check `Leostream.*InstallerUri` resolves with `Invoke-WebRequest -Method Head`, then pass a current URL via `-InstallerUri` |
+| `No match for argument: ./leostream-...` | dnf only accepts a local package whose name ends in `.rpm` | Fixed — the scripts keep the upstream file name. Only occurs with a URL that has no file component |
+| `nothing provides libguac` / `openvpn` / `mod_perl` | EPEL is not enabled, so the Leostream dependencies cannot resolve | The install scripts enable EPEL automatically; if you installed by hand, run `dnf -y install epel-release` first |
 | SSH to the Gateway hangs | Your IP is not in `AllowedClientCidrs` | Add it, then re-run `Deploy-LeostreamPoC.ps1` to update the NSG |
 | Gateway page unreachable from your browser | Same cause as above, or the Gateway software is not installed yet | Fix the CIDR, then check `systemctl status leostream-gateway` |
 | Cannot SSH to the Broker directly | Working as designed — it has no public IP | Use `ssh -J` through the Gateway |

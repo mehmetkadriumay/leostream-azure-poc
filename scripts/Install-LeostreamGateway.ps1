@@ -17,19 +17,23 @@
     repository.
 
 .PARAMETER InstallerUri
-    HTTPS URI of the Leostream Gateway installer.
+    HTTPS URI of the Leostream Gateway installer. Defaults to
+    Leostream.GatewayInstallerUri in poc.config.psd1. Both a .rpm package and a
+    shell installer are supported; the script detects which it received.
 
 .PARAMETER BrokerAddress
     Private IP or DNS name of the Broker. Defaults to the value in poc.config.psd1.
 
 .EXAMPLE
-    ./Install-LeostreamGateway.ps1 -InstallerUri 'https://<your-portal>/leostream-gateway.sh'
+    ./Install-LeostreamGateway.ps1
+
+.EXAMPLE
+    ./Install-LeostreamGateway.ps1 -InstallerUri 'https://downloads.leostream.com/leostream-gateway-2026.1.1-2.x86_64.rpm'
 #>
 [CmdletBinding(SupportsShouldProcess = $true)]
 param(
     [string] $ConfigPath = (Join-Path (Join-Path $PSScriptRoot '..') (Join-Path 'config' 'poc.config.psd1')),
 
-    [Parameter(Mandatory)]
     [ValidatePattern('^https://')]
     [string] $InstallerUri,
 
@@ -46,6 +50,14 @@ $rgName = $config.Azure.ResourceGroupName
 $spec   = $config.VirtualMachines.Gateway
 
 if (-not $BrokerAddress) { $BrokerAddress = $config.VirtualMachines.Broker.PrivateIp }
+
+if (-not $InstallerUri) {
+    $InstallerUri = $config.Leostream.GatewayInstallerUri
+}
+if (-not $InstallerUri) {
+    throw 'No installer URI. Set Leostream.GatewayInstallerUri in poc.config.psd1 or pass -InstallerUri.'
+}
+Write-Host "==> Installer: $InstallerUri" -ForegroundColor Cyan
 
 if (-not (Get-AzContext -ErrorAction SilentlyContinue)) {
     Connect-AzAccount | Out-Null
@@ -90,19 +102,40 @@ firewall-cmd --permanent --add-port=443/tcp
 firewall-cmd --permanent --add-service=ssh
 firewall-cmd --reload
 
+echo '--- enabling EPEL ---'
+# The Gateway package needs libguac, openvpn, certbot, mod_perl and others
+# that are not in the Azure RHUI repositories. CodeReady Builder is already
+# enabled on the Azure RHEL image.
+if ! dnf -y install epel-release 2>/dev/null; then
+    dnf -y install https://dl.fedoraproject.org/pub/epel/epel-release-latest-9.noarch.rpm
+fi
+
 INSTALLER_URI='__INSTALLER_URI__'
 WORKDIR=$(mktemp -d)
 cd "$WORKDIR"
 
-echo '--- downloading Leostream Gateway installer ---'
-curl -fsSL -o leostream-gateway-installer "$INSTALLER_URI"
-chmod +x leostream-gateway-installer
+# Keep the upstream file name. dnf only treats a local path as a package when
+# it ends in .rpm - otherwise it reads it as a package name and fails with
+# "No match for argument". Drop the query string of a pre-signed URL, then the
+# scheme and host, and fall back if what is left has no file component.
+INSTALLER_PATH="${INSTALLER_URI%%\?*}"
+INSTALLER_PATH="${INSTALLER_PATH#*://}"
+INSTALLER_FILE=''
+case "$INSTALLER_PATH" in
+    */)  : ;;
+    */*) INSTALLER_FILE="${INSTALLER_PATH##*/}" ;;
+esac
+[ -n "$INSTALLER_FILE" ] || INSTALLER_FILE='leostream-gateway-installer'
+
+echo "--- downloading Leostream Gateway installer ($INSTALLER_FILE) ---"
+curl -fsSL -o "$INSTALLER_FILE" "$INSTALLER_URI"
 
 echo '--- running installer ---'
-if head -c 2 leostream-gateway-installer | grep -q '#!' ; then
-    ./leostream-gateway-installer
+if head -c 2 "$INSTALLER_FILE" | grep -q '#!' ; then
+    chmod +x "$INSTALLER_FILE"
+    "./$INSTALLER_FILE"
 else
-    dnf -y install ./leostream-gateway-installer
+    dnf -y install "./$INSTALLER_FILE"
 fi
 
 echo '--- recording broker address ---'
