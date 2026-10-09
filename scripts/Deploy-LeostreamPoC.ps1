@@ -106,7 +106,34 @@ if (-not (Test-Path -Path $sshKeyPath)) {
     throw "SSH public key not found at '$sshKeyPath'. Generate one with: ssh-keygen -t ed25519 -C leostream-poc"
 }
 $sshPublicKey = (Get-Content -Path $sshKeyPath -Raw).Trim()
-Write-Ok "Using SSH public key: $sshKeyPath"
+
+# Azure rejects a malformed key with the opaque message "The value of parameter
+# linuxConfiguration.ssh.publicKeys.keyData is invalid", naming neither the file
+# nor what is wrong with it. Everything below is checked locally so the failure
+# names the actual problem instead.
+$hint = "Admin.SshPublicKeyPath in config/poc.config.psd1 currently points at '$sshKeyPath'."
+if ($sshPublicKey -match '-----BEGIN .*PRIVATE KEY-----') {
+    throw "'$sshKeyPath' is a PRIVATE key, not a public one. Azure needs the public half - the same path with a .pub suffix. $hint"
+}
+if ($sshPublicKey -match '^PuTTY-User-Key-File') {
+    throw "'$sshKeyPath' is in PuTTY .ppk format, which Azure does not accept. Export it with PuTTYgen (Conversions > Export OpenSSH key) or convert the public half with: ssh-keygen -i -f '$sshKeyPath'. $hint"
+}
+if ([string]::IsNullOrWhiteSpace($sshPublicKey)) {
+    throw "'$sshKeyPath' is empty. $hint"
+}
+# A valid OpenSSH public key is one line: "<type> <base64> [comment]".
+$keyFields = $sshPublicKey -split '\s+'
+$validTypes = @('ssh-rsa', 'ssh-ed25519', 'ecdsa-sha2-nistp256', 'ecdsa-sha2-nistp384', 'ecdsa-sha2-nistp521')
+if ($sshPublicKey -match '\r|\n') {
+    throw "'$sshKeyPath' contains more than one line. An OpenSSH public key is a single line. $hint"
+}
+if ($keyFields.Count -lt 2 -or $validTypes -notcontains $keyFields[0]) {
+    throw "'$sshKeyPath' does not look like an OpenSSH public key. Expected it to start with one of: $($validTypes -join ', '). It starts with '$($keyFields[0])'. $hint"
+}
+try { [Convert]::FromBase64String($keyFields[1]) | Out-Null }
+catch { throw "The key body in '$sshKeyPath' is not valid base64, so Azure will reject it. Regenerate the key pair. $hint" }
+
+Write-Ok "Using SSH public key: $sshKeyPath ($($keyFields[0]))"
 
 #region resource group --------------------------------------------------------
 
