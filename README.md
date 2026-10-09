@@ -612,12 +612,23 @@ Rough guide for `westeurope`, pay-as-you-go, running continuously:
 |---|---|
 | `leo-broker-01` (D4s_v5) | high |
 | `leo-gateway-01` (D2s_v5) | medium |
-| Managed disks, one public IP | low |
+| NAT gateway (hourly + data processed) | low–medium, around USD 32 |
+| Managed disks, two public IPs | low |
 
-Two VMs and a public IP are the entire bill — there is no Bastion host and no
-desktop, which are the two largest line items in a typical Leostream PoC. Keep it
-cheaper still by using `Standard_D2s_v5` for both VMs, deallocating them when
-idle, and running `Remove-LeostreamPoC.ps1` as soon as the evaluation is
+Two VMs, a NAT gateway and two public IPs are the entire bill — there is no
+Bastion host and no desktop, which are the two largest line items in a typical
+Leostream PoC.
+
+The NAT gateway exists because the Broker has no public IP and Azure
+[retired default outbound access](https://learn.microsoft.com/azure/virtual-network/ip-services/default-outbound-access)
+on 30 September 2025. Without it the Broker cannot reach the RHEL, EPEL or
+Leostream download endpoints and `Install-LeostreamBroker.ps1` fails with
+repository timeouts. It is outbound-only, so the Broker stays unreachable from
+the internet. If you have another outbound path, such as a firewall or a
+pre-existing NAT gateway on the subnet, set `Network.NatGatewayEnabled = $false`.
+
+Keep it cheaper still by using `Standard_D2s_v5` for both VMs, deallocating them
+when idle, and running `Remove-LeostreamPoC.ps1` as soon as the evaluation is
 finished. Always confirm current prices with the
 [Azure pricing calculator](https://azure.microsoft.com/pricing/calculator/).
 

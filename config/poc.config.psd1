@@ -42,6 +42,20 @@
         SubnetName   = 'snet-leostream'
         SubnetPrefix = '10.50.1.0/24'
         NsgName      = 'nsg-leostream'
+
+        # The Broker has no public IP, and Azure retired default outbound
+        # internet access on 30 September 2025. Without a NAT gateway it cannot
+        # reach the RHUI, EPEL or Leostream download endpoints, so the install
+        # fails with repository timeouts. A NAT gateway gives outbound-only
+        # access: nothing on the internet can initiate a connection inward.
+        #
+        # Billed per hour plus data processed (roughly USD 32/month in most
+        # regions). Remove-LeostreamPoC.ps1 deletes it with the resource group.
+        # Set to $false only if you provide outbound access another way.
+        NatGatewayEnabled    = $true
+        NatGatewayName       = 'natgw-leostream'
+        NatGatewayPublicIp   = 'pip-natgw-leostream'
+        NatGatewayIdleMinutes = 10
     }
 
     # Source ranges allowed to reach the Gateway's public IP on 443 (users)

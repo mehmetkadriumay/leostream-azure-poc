@@ -83,6 +83,28 @@ aimed at the Gateway.
 | Administrator → Broker UI | SSH local forward through the Gateway | 443 → localhost:8443 |
 | Broker → Azure | Outbound HTTPS to Azure Resource Manager | 443 |
 | Both VMs → Azure control plane | RunCommand via the guest agent, outbound only | 443 |
+| Broker → internet | Outbound only, via the NAT gateway | 443 |
+| Gateway → internet | Outbound via its own instance-level public IP | 443 |
+
+### Outbound internet
+
+Azure [retired default outbound access](https://learn.microsoft.com/azure/virtual-network/ip-services/default-outbound-access)
+on 30 September 2025, so a VM with no public IP, NAT gateway or load-balancer
+outbound rule has no route to the internet at all.
+
+`leo-gateway-01` is unaffected: an instance-level public IP provides outbound as
+well as inbound. `leo-broker-01` is deliberately private, so it would otherwise
+be unable to reach the RHEL, EPEL and Leostream download endpoints its
+installation depends on — surfacing as repository metadata timeouts rather than
+an obvious connectivity error.
+
+`natgw-leostream` is attached to `snet-leostream` to supply that path. A NAT
+gateway initiates connections outward only; nothing on the internet can use it
+to reach either VM, so the Broker stays private. Both VMs share it, though the
+Gateway continues to prefer its own public IP.
+
+Set `Network.NatGatewayEnabled = $false` if the subnet already has outbound
+access by another route, such as a firewall or user-defined route.
 
 ## Identity
 

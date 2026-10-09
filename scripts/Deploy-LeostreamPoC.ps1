@@ -201,6 +201,52 @@ elseif ($PSCmdlet.ShouldProcess($net.NsgName, 'Create network security group')) 
 
 #endregion
 
+#region NAT gateway -----------------------------------------------------------
+
+# The Broker has no public IP. Azure retired default outbound access on
+# 30 September 2025, so without this the Broker cannot reach the package
+# repositories and Install-LeostreamBroker.ps1 fails on repository timeouts.
+# A NAT gateway is outbound-only, so the Broker stays unreachable from outside.
+$natGateway = $null
+$natEnabled = $net.Contains('NatGatewayEnabled') -and $net.NatGatewayEnabled
+if ($natEnabled) {
+    Write-Step "NAT gateway '$($net.NatGatewayName)' for outbound access"
+
+    $natPip = Get-AzPublicIpAddress -ResourceGroupName $rgName -Name $net.NatGatewayPublicIp -ErrorAction SilentlyContinue
+    if (-not $natPip -and $PSCmdlet.ShouldProcess($net.NatGatewayPublicIp, 'Create NAT gateway public IP')) {
+        # A NAT gateway requires a Standard SKU, statically allocated address.
+        $natPip = New-AzPublicIpAddress `
+            -ResourceGroupName $rgName `
+            -Name $net.NatGatewayPublicIp `
+            -Location $location `
+            -AllocationMethod Static `
+            -Sku Standard `
+            -Tag $tags
+        Write-Ok 'Public IP created.'
+    }
+    elseif ($natPip) {
+        Write-Ok 'Public IP already exists.'
+    }
+
+    $natGateway = Get-AzNatGateway -ResourceGroupName $rgName -Name $net.NatGatewayName -ErrorAction SilentlyContinue
+    if (-not $natGateway -and $natPip -and $PSCmdlet.ShouldProcess($net.NatGatewayName, 'Create NAT gateway')) {
+        $natGateway = New-AzNatGateway `
+            -ResourceGroupName $rgName `
+            -Name $net.NatGatewayName `
+            -Location $location `
+            -Sku Standard `
+            -PublicIpAddress $natPip `
+            -IdleTimeoutInMinutes $net.NatGatewayIdleMinutes `
+            -Tag $tags
+        Write-Ok 'Created.'
+    }
+    elseif ($natGateway) {
+        Write-Ok 'Already exists.'
+    }
+}
+
+#endregion
+
 #region virtual network -------------------------------------------------------
 
 Write-Step "Virtual network '$($net.VNetName)' with subnet '$($net.SubnetName)'"
@@ -208,10 +254,13 @@ Write-Step "Virtual network '$($net.VNetName)' with subnet '$($net.SubnetName)'"
 $vnet = Get-AzVirtualNetwork -ResourceGroupName $rgName -Name $net.VNetName -ErrorAction SilentlyContinue
 if (-not $vnet) {
     if ($PSCmdlet.ShouldProcess($net.VNetName, 'Create virtual network')) {
-        $subnetConfig = New-AzVirtualNetworkSubnetConfig `
-            -Name $net.SubnetName `
-            -AddressPrefix $net.SubnetPrefix `
-            -NetworkSecurityGroup $nsg
+        $subnetParams = @{
+            Name                 = $net.SubnetName
+            AddressPrefix        = $net.SubnetPrefix
+            NetworkSecurityGroup = $nsg
+        }
+        if ($natGateway) { $subnetParams['NatGateway'] = $natGateway }
+        $subnetConfig = New-AzVirtualNetworkSubnetConfig @subnetParams
 
         $vnet = New-AzVirtualNetwork `
             -ResourceGroupName $rgName `
@@ -225,6 +274,25 @@ if (-not $vnet) {
 }
 else {
     Write-Ok 'Already exists.'
+
+    # Attach the NAT gateway to a subnet that predates it, so an existing
+    # deployment gains outbound access without being torn down.
+    if ($natGateway) {
+        $existingSubnet = $vnet.Subnets | Where-Object { $_.Name -eq $net.SubnetName }
+        $attachedId = $null
+        if ($existingSubnet -and $existingSubnet.NatGateway) { $attachedId = $existingSubnet.NatGateway.Id }
+
+        if ($existingSubnet -and $attachedId -ne $natGateway.Id) {
+            if ($PSCmdlet.ShouldProcess($net.SubnetName, 'Attach NAT gateway to subnet')) {
+                $existingSubnet.NatGateway = $natGateway
+                $vnet = Set-AzVirtualNetwork -VirtualNetwork $vnet
+                Write-Ok "NAT gateway attached to subnet '$($net.SubnetName)'."
+            }
+        }
+        elseif ($attachedId) {
+            Write-Ok 'NAT gateway already attached to the subnet.'
+        }
+    }
 }
 
 if (-not $vnet) {

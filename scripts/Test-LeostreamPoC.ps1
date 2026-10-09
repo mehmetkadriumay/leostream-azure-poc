@@ -102,6 +102,20 @@ if ($vnet) {
         else {
             Add-Result -Area 'Network' -Check 'NSG attached to the subnet' -Status Fail -Detail 'no NSG attached'
         }
+
+        # Without an outbound path the private Broker cannot reach the package
+        # repositories, which surfaces only as repository timeouts during
+        # installation. Check it here instead.
+        if ($config.Network.Contains('NatGatewayEnabled') -and $config.Network.NatGatewayEnabled) {
+            if ($subnet.NatGateway) {
+                $natName = ($subnet.NatGateway.Id -split '/')[-1]
+                Add-Result -Area 'Network' -Check 'NAT gateway attached (Broker outbound)' -Status Pass -Detail $natName
+            }
+            else {
+                Add-Result -Area 'Network' -Check 'NAT gateway attached (Broker outbound)' -Status Fail `
+                    -Detail 'no NAT gateway on the subnet - the Broker has no outbound internet, so installation will fail'
+            }
+        }
     }
     else {
         Add-Result -Area 'Network' -Check "Subnet $($config.Network.SubnetName)" -Status Fail -Detail "expected $($config.Network.SubnetPrefix), found $($subnet.AddressPrefix -join ',')"

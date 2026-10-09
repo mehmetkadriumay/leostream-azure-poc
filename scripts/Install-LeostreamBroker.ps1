@@ -84,7 +84,7 @@ if ($LicenseKey) {
     $plainLicense = [System.Net.NetworkCredential]::new('', $LicenseKey).Password
 }
 
-$updateCmd = if ($SkipOsUpdate) { 'echo "skipping OS update"' } else { 'dnf -y update' }
+$updateCmd = if ($SkipOsUpdate) { 'echo "skipping OS update"' } else { 'dnf_retry update' }
 
 # Literal here-string so bash variables stay intact; placeholders are substituted below.
 $template = @'
@@ -93,8 +93,37 @@ set -euo pipefail
 
 echo '=== Leostream Broker preparation ==='
 
+# Azure's RHUI mirrors intermittently time out fetching repository metadata,
+# which aborts the whole install under 'set -e'. Be patient and retry; only if
+# a repo is still unreachable after that, let dnf skip it rather than fail.
+cat >> /etc/dnf/dnf.conf <<'DNFCONF'
+timeout=60
+retries=5
+minrate=0
+DNFCONF
+
+dnf_retry() {
+    attempt=1
+    while [ "$attempt" -le 3 ]; do
+        if dnf -y "$@"; then
+            return 0
+        fi
+        echo "--- dnf $1 failed (attempt $attempt of 3), retrying in 15s ---"
+        sleep 15
+        attempt=$((attempt + 1))
+    done
+    echo "--- dnf $1 failed after 3 attempts ---"
+    echo '--- If this is a repository timeout, the Broker has no outbound internet.'
+    echo '--- It has no public IP, and Azure retired default outbound access in'
+    echo '--- September 2025, so the subnet needs a NAT gateway. Check with:'
+    echo '---   curl -s -o /dev/null -w "%{http_code}" --max-time 20 https://www.microsoft.com/'
+    echo '--- A result of 000 means no outbound path. Re-run Deploy-LeostreamPoC.ps1,'
+    echo '--- which creates the NAT gateway when Network.NatGatewayEnabled is $true.'
+    return 1
+}
+
 __OS_UPDATE__
-dnf -y install firewalld chrony policycoreutils-python-utils tar curl ca-certificates
+dnf_retry install firewalld chrony policycoreutils-python-utils tar curl ca-certificates
 
 systemctl enable --now chronyd
 systemctl enable --now firewalld
@@ -111,7 +140,7 @@ echo '--- enabling EPEL ---'
 # The Leostream packages depend on software that is not in the Azure RHUI
 # repositories. CodeReady Builder is already enabled on the Azure RHEL image.
 if ! dnf -y install epel-release 2>/dev/null; then
-    dnf -y install https://dl.fedoraproject.org/pub/epel/epel-release-latest-9.noarch.rpm
+    dnf_retry install https://dl.fedoraproject.org/pub/epel/epel-release-latest-9.noarch.rpm
 fi
 
 INSTALLER_URI='__INSTALLER_URI__'
@@ -139,16 +168,37 @@ if head -c 2 "$INSTALLER_FILE" | grep -q '#!' ; then
     chmod +x "$INSTALLER_FILE"
     "./$INSTALLER_FILE"
 else
-    dnf -y install "./$INSTALLER_FILE"
+    dnf_retry install "./$INSTALLER_FILE"
 fi
 
 echo '--- enabling Leostream services ---'
-# postgresql is what the Platform 26 package pulls in; mariadb and nginx are
-# listed for older builds. Missing units are skipped.
-for svc in postgresql mariadb httpd nginx leostream; do
-    if systemctl list-unit-files | grep -q "^${svc}"; then
+# The Platform 26 unit is 'leostream-broker', not 'leostream', and it pulls in
+# postgresql. Match on the exact unit name: a prefix match finds
+# leostream-broker.service but then tries to enable a 'leostream' unit that
+# does not exist, which used to fail silently and leave the Broker stopped.
+# Leostream bundles its own httpd and redis under /opt/leostream, so no
+# separate web server package is required.
+for svc in postgresql leostream-broker; do
+    if systemctl list-unit-files --no-legend "${svc}.service" 2>/dev/null | grep -q "^${svc}\.service"; then
         systemctl enable --now "$svc" || echo "could not enable $svc"
+    else
+        echo "unit ${svc}.service not present - skipping"
     fi
+done
+
+echo '--- waiting for the Broker web interface ---'
+# control.pl returns as soon as it has forked its workers, so the listener is
+# not up yet when systemd reports the unit active. Poll rather than guess.
+for attempt in $(seq 1 30); do
+    if curl -k -s -o /dev/null --max-time 10 https://localhost/ ; then
+        echo "Broker web interface responding after ${attempt} attempt(s)."
+        break
+    fi
+    if [ "$attempt" -eq 30 ]; then
+        echo 'WARNING: the Broker web interface did not respond within 5 minutes.'
+        echo 'Check "systemctl status leostream-broker" and /opt/leostream/logs/.'
+    fi
+    sleep 10
 done
 
 LICENSE_KEY='__LICENSE_KEY__'
@@ -182,9 +232,21 @@ if ($PSCmdlet.ShouldProcess($spec.Name, 'Install Leostream Platform 26')) {
             -CommandId 'RunShellScript' `
             -ScriptPath $tempFile.FullName
 
+        $combined = ''
         foreach ($out in $result.Value) {
             Write-Host "--- $($out.DisplayStatus) ---" -ForegroundColor DarkGray
             Write-Host $out.Message
+            $combined += $out.Message
+        }
+
+        # 'Enable succeeded' only means the RunCommand extension ran; it says
+        # nothing about the script's exit code. The script runs under
+        # 'set -euo pipefail', so it stops at the first failure and never
+        # prints its final marker. Without this check a failed install is
+        # reported as success.
+        if ($combined -notmatch '=== Broker preparation complete ===') {
+            throw ("Installation did not complete on $($spec.Name). The script stopped early - see the output above for the failing step. " +
+                   'Nothing was rolled back, and the script is safe to re-run once the cause is resolved.')
         }
     }
     finally {

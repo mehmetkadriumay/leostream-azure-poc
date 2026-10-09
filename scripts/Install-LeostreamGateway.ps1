@@ -68,7 +68,7 @@ if (-not $vm) {
     throw "VM '$($spec.Name)' not found in resource group '$rgName'. Run Deploy-LeostreamPoC.ps1 first."
 }
 
-$updateCmd = if ($SkipOsUpdate) { 'echo "skipping OS update"' } else { 'dnf -y update' }
+$updateCmd = if ($SkipOsUpdate) { 'echo "skipping OS update"' } else { 'dnf_retry update' }
 
 $template = @'
 #!/bin/bash
@@ -76,8 +76,31 @@ set -euo pipefail
 
 echo '=== Leostream Gateway preparation ==='
 
+# Azure's RHUI mirrors intermittently time out fetching repository metadata,
+# which aborts the whole install under 'set -e'. Be patient and retry; only if
+# a repo is still unreachable after that, let dnf skip it rather than fail.
+cat >> /etc/dnf/dnf.conf <<'DNFCONF'
+timeout=60
+retries=5
+minrate=0
+DNFCONF
+
+dnf_retry() {
+    attempt=1
+    while [ "$attempt" -le 3 ]; do
+        if dnf -y "$@"; then
+            return 0
+        fi
+        echo "--- dnf $1 failed (attempt $attempt of 3), retrying in 15s ---"
+        sleep 15
+        attempt=$((attempt + 1))
+    done
+    echo "--- dnf $1 failed after 3 attempts ---"
+    return 1
+}
+
 __OS_UPDATE__
-dnf -y install firewalld chrony curl tar ca-certificates policycoreutils-python-utils
+dnf_retry install firewalld chrony curl tar ca-certificates policycoreutils-python-utils
 
 systemctl enable --now chronyd
 systemctl enable --now firewalld
@@ -107,7 +130,7 @@ echo '--- enabling EPEL ---'
 # that are not in the Azure RHUI repositories. CodeReady Builder is already
 # enabled on the Azure RHEL image.
 if ! dnf -y install epel-release 2>/dev/null; then
-    dnf -y install https://dl.fedoraproject.org/pub/epel/epel-release-latest-9.noarch.rpm
+    dnf_retry install https://dl.fedoraproject.org/pub/epel/epel-release-latest-9.noarch.rpm
 fi
 
 INSTALLER_URI='__INSTALLER_URI__'
@@ -135,7 +158,7 @@ if head -c 2 "$INSTALLER_FILE" | grep -q '#!' ; then
     chmod +x "$INSTALLER_FILE"
     "./$INSTALLER_FILE"
 else
-    dnf -y install "./$INSTALLER_FILE"
+    dnf_retry install "./$INSTALLER_FILE"
 fi
 
 echo '--- recording broker address ---'
@@ -143,10 +166,34 @@ mkdir -p /etc/leostream
 echo 'broker_address=__BROKER_ADDRESS__' > /etc/leostream/gateway.conf
 chmod 0640 /etc/leostream/gateway.conf
 
-for svc in leostream-gateway nginx; do
-    if systemctl list-unit-files | grep -q "^${svc}"; then
+echo '--- enabling Gateway services ---'
+# The Gateway ships no 'leostream-gateway' unit. It serves 443 through the
+# distribution httpd (with a drop-in at /etc/systemd/system/httpd.service.d/leo.conf),
+# proxies to tomcat, and runs guacd plus its own wsping unit. The RPM enables
+# these itself; re-asserting them is harmless and makes the dependency explicit.
+#
+# Match the exact unit name. A prefix match succeeds for a unit that merely
+# starts with the same text and then fails to enable, which is silent because
+# of the '||' fallback, leaving the service stopped.
+for svc in httpd tomcat guacd wsping; do
+    if systemctl list-unit-files --no-legend "${svc}.service" 2>/dev/null | grep -q "^${svc}\.service"; then
         systemctl enable --now "$svc" || echo "could not enable $svc"
+    else
+        echo "unit ${svc}.service not present - skipping"
     fi
+done
+
+echo '--- waiting for the Gateway web interface ---'
+for attempt in $(seq 1 30); do
+    if curl -k -s -o /dev/null --max-time 10 https://localhost/ ; then
+        echo "Gateway web interface responding after ${attempt} attempt(s)."
+        break
+    fi
+    if [ "$attempt" -eq 30 ]; then
+        echo 'WARNING: the Gateway web interface did not respond within 5 minutes.'
+        echo 'Check "systemctl status httpd tomcat guacd wsping".'
+    fi
+    sleep 10
 done
 
 rm -rf "$WORKDIR"
@@ -174,9 +221,21 @@ if ($PSCmdlet.ShouldProcess($spec.Name, 'Install Leostream Gateway')) {
             -CommandId 'RunShellScript' `
             -ScriptPath $tempFile.FullName
 
+        $combined = ''
         foreach ($out in $result.Value) {
             Write-Host "--- $($out.DisplayStatus) ---" -ForegroundColor DarkGray
             Write-Host $out.Message
+            $combined += $out.Message
+        }
+
+        # 'Enable succeeded' only means the RunCommand extension ran; it says
+        # nothing about the script's exit code. The script runs under
+        # 'set -euo pipefail', so it stops at the first failure and never
+        # prints its final marker. Without this check a failed install is
+        # reported as success.
+        if ($combined -notmatch '=== Gateway preparation complete ===') {
+            throw ("Installation did not complete on $($spec.Name). The script stopped early - see the output above for the failing step. " +
+                   'Nothing was rolled back, and the script is safe to re-run once the cause is resolved.')
         }
     }
     finally {
