@@ -15,7 +15,7 @@
           public IP address
         * Broker and Gateway are distinct virtual machines
         * both VMs running
-        * Broker has a system-assigned managed identity with a role assignment
+        * Broker has a system-assigned managed identity
 
       Services
         * Gateway TCP/443 and TCP/22 reachable from the current machine
@@ -181,19 +181,13 @@ foreach ($spec in @($brokerSpec, $gatewaySpec)) {
     }
 }
 
-# --- managed identity and RBAC ------------------------------------------------
+# --- managed identity ---------------------------------------------------------
+# The identity is created ready for use but is deliberately left with no role
+# assignment: this PoC has no desktop VMs for the Broker to power-manage.
 $brokerVm = Get-AzVM -ResourceGroupName $rgName -Name $brokerSpec.Name -ErrorAction SilentlyContinue
 if ($brokerVm) {
     if ($brokerVm.Identity -and $brokerVm.Identity.PrincipalId) {
         Add-Result -Area 'Identity' -Check 'Broker system-assigned managed identity' -Status Pass -Detail $brokerVm.Identity.PrincipalId
-
-        $assignments = Get-AzRoleAssignment -ObjectId $brokerVm.Identity.PrincipalId -ErrorAction SilentlyContinue
-        if ($assignments) {
-            Add-Result -Area 'Identity' -Check 'Broker identity role assignment' -Status Pass -Detail (($assignments.RoleDefinitionName | Select-Object -Unique) -join ', ')
-        }
-        else {
-            Add-Result -Area 'Identity' -Check 'Broker identity role assignment' -Status Fail -Detail 'run Configure-LeostreamAzureRBAC.ps1'
-        }
     }
     else {
         Add-Result -Area 'Identity' -Check 'Broker system-assigned managed identity' -Status Fail

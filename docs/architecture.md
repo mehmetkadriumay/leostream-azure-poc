@@ -88,9 +88,18 @@ aimed at the Gateway.
 
 `leo-broker-01` is created with a system-assigned managed identity
 (`New-AzVMConfig -IdentityType SystemAssigned`).
-`Configure-LeostreamAzureRBAC.ps1` grants that identity **Virtual Machine
-Contributor** on the resource group, which is what the Broker needs to discover,
-start and stop VMs through its Azure center.
+
+That identity is deliberately left **with no role assignment**. A role would let
+the Broker discover, start and stop desktop VMs through an Azure center, and this
+PoC deploys no desktops — so the permission would grant power over the
+subscription that nothing uses. Creating the identity but not assigning a role
+keeps the groundwork in place at zero privilege.
+
+If desktops are added later, someone holding **User Access Administrator** or
+**Owner** grants the identity **Virtual Machine Contributor** on the resource
+group. Note that this cannot be self-served from a Contributor account, and many
+subscriptions apply an ABAC condition that further restricts which roles a
+delegated administrator may assign.
 
 No service principal is created and no secret is stored anywhere — in this
 repository, in the VM, or in the Broker configuration.
@@ -101,7 +110,8 @@ repository, in the VM, or in the Broker configuration.
 |---|---|---|
 | Azure Bastion | Roughly doubles the cost of the PoC and takes 10–20 minutes to provision | Administration is over SSH to the Gateway's public IP |
 | Separate subnets per tier | Two VMs do not need network segmentation to prove the concept | Gateway and Broker are not isolated from each other |
-| Desktop VMs | The largest cost item, and not needed to prove the Azure integration | Pools, policies and end-to-end sessions are not exercised |
+| Desktop VMs | The largest cost item, and not needed to prove the control plane | Pools, policies and end-to-end sessions are not exercised |
+| A role assignment for the Broker identity | Nothing to manage without desktops, and granting roles needs User Access Administrator, which a Contributor cannot self-serve | No Azure center; the identity exists at zero privilege |
 | Explicit deny rules | Azure already denies inbound by default at 65500 | None — the effective behaviour is identical |
 | Trusted Launch / vTPM | Extra configuration surface for no PoC benefit | VMs use the standard security type |
 

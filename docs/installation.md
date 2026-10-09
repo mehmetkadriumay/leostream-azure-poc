@@ -10,7 +10,7 @@ running inside the VMs.
 |---|---|
 | PowerShell | Windows PowerShell 5.1 or PowerShell 7.4+ |
 | Az modules | `Install-Module Az -Scope CurrentUser` |
-| Azure rights | Contributor **and** User Access Administrator (or Owner) |
+| Azure rights | **Contributor**. User Access Administrator is *not* needed — no role assignments are created |
 | Quota | ~6 vCPUs of the `Dsv5` family in your region |
 | SSH key | Either reuse `~/.ssh/id_rsa.pub`, which is the config default, or generate `ssh-keygen -t ed25519 -C "leostream-poc" -f $HOME\.ssh\leostream_poc` **and** point `Admin.SshPublicKeyPath` at it |
 | Leostream media | HTTPS download URLs for the Platform 26 and Gateway installers, plus an evaluation licence key |
@@ -47,13 +47,54 @@ Change `Azure.Location` if `westeurope` is not where you want the PoC, and
 ## 2. Sign in
 
 ```powershell
-Connect-AzAccount
+Connect-AzAccount -Tenant '<tenant-id>'
 Set-AzContext -Subscription '<subscription-id>'
 Get-AzContext | Format-List Name, Account, Subscription, Tenant
 ```
 
+Always confirm the last line prints the subscription and tenant you expect
+before deploying. Creating the PoC in the wrong subscription is easy and tedious
+to unpick.
+
+### Finding your tenant and subscription IDs
+
+`-Tenant` is required whenever your account exists in more than one Entra ID
+directory — guest accounts, partner tenants, or anyone with both a corporate and
+a customer directory. Without it `Connect-AzAccount` authenticates against your
+**home** tenant, which may not be the one holding the target subscription. The
+symptom is a successful sign-in followed by the subscription simply not being
+listed, or `Get-AzSubscription` returning nothing useful.
+
+```powershell
+# Sign in first, then list what you can actually see
+Connect-AzAccount
+
+# Every tenant your account can reach - find yours by DefaultDomain
+Get-AzTenant | Format-Table Id, Name, DefaultDomain
+
+# Subscriptions within one specific tenant
+Get-AzSubscription -TenantId '<tenant-id>' | Format-Table Name, Id, TenantId, State
+```
+
+Take the `TenantId` of the subscription you want, then re-run
+`Connect-AzAccount -Tenant '<that-id>'`.
+
+> **Expect warning noise.** If your account is a guest in many directories —
+> common for consultants and partner-facing staff — a bare `Get-AzSubscription`
+> tries every tenant and prints
+> `Unable to acquire token for tenant ... User interaction is required` for each
+> one it cannot silently authenticate to. That is **not** an error with your
+> setup; those are simply tenants you have not signed in to in this session.
+> Scoping the call with `-TenantId`, as above, avoids the noise. The
+> subscriptions that do list are still valid.
+
+If a Conditional Access policy blocks the default browser flow, add
+`-UseDeviceAuthentication` to `Connect-AzAccount`.
+
 Alternatively set `Azure.SubscriptionId` in the config file and let the scripts
-select it for you.
+select it for you. The tenant still has to be correct at sign-in time —
+`Azure.SubscriptionId` only chooses among subscriptions you are already
+authenticated to see.
 
 ## 3. Deploy the infrastructure
 
@@ -78,27 +119,7 @@ rules are rewritten on each run, which is how you apply a changed
 It finishes by printing the Gateway's public IP and the three SSH commands you
 need for administration. Keep that output.
 
-## 4. Grant the Broker its Azure role
-
-```powershell
-./Configure-LeostreamAzureRBAC.ps1
-```
-
-This confirms the system-assigned managed identity on `leo-broker-01`, enabling
-it if it is somehow missing, and assigns **Virtual Machine Contributor** at
-resource group scope. New identities take a short while to replicate through
-Entra ID, so the script retries for about two minutes before giving up.
-
-Record the subscription ID, tenant ID and resource group name it prints — you
-type them into the Broker UI in step 7.
-
-To let the Broker manage VMs outside the resource group:
-
-```powershell
-./Configure-LeostreamAzureRBAC.ps1 -Scope Subscription
-```
-
-## 5. Install Leostream Platform 26 on the Broker
+## 4. Install Leostream Platform 26 on the Broker
 
 ```powershell
 ./Install-LeostreamBroker.ps1 -InstallerUri 'https://<portal>/<platform-26-installer>'
@@ -119,7 +140,7 @@ $licence = Read-Host -AsSecureString 'Leostream licence key'
 Allow 10–20 minutes. RunCommand streams the output back when the script finishes,
 not as it runs, so a long silence is normal.
 
-## 6. Install the Leostream Gateway
+## 5. Install the Leostream Gateway
 
 ```powershell
 ./Install-LeostreamGateway.ps1 -InstallerUri 'https://<portal>/<gateway-installer>'
@@ -137,7 +158,7 @@ out.
 The Broker address defaults to `VirtualMachines.Broker.PrivateIp` from config.
 Override it with `-BrokerAddress` if you changed the addressing.
 
-## 7. Configure Leostream
+## 6. Configure Leostream
 
 ### Reaching the Broker console
 
@@ -180,18 +201,16 @@ symptom-by-symptom troubleshooting table, are in the
 
 1. **Sign in** as `admin` / `leo`, then change the password immediately.
 2. **System > License** — apply your evaluation licence.
-3. **Setup > Centers > Add Center > Azure** — choose authentication
-   **Managed identity**, and enter the subscription, tenant and resource group
-   from step 4. Save, then confirm the center lists your VMs.
-4. **Setup > Gateways** — add `leo-gateway-01`. Clients connect to the public
+3. **Setup > Gateways** — add `leo-gateway-01`. Clients connect to the public
    address; the Broker talks to it on `10.50.1.20`.
-5. **Configuration > Protocol Plans** — create a plan that uses RDP through the
+4. **Configuration > Protocol Plans** — create a plan that uses RDP through the
    Gateway.
 
-That is the full extent of what this PoC configures. Pools, policies and
-assignments require at least one desktop.
+That is the full extent of what this PoC configures. Do **not** add an Azure
+center: a center discovers and power-manages desktop VMs, and there are none
+here. Pools, policies and assignments likewise require at least one desktop.
 
-## 8. Validate
+## 7. Validate
 
 ```powershell
 ./Test-LeostreamPoC.ps1
@@ -200,15 +219,19 @@ assignments require at least one desktop.
 See [validation.md](validation.md) for what each check means and for the manual
 tests the script cannot perform.
 
-## 9. Adding a desktop later (optional)
+## 8. Adding a desktop later (optional)
 
 This PoC deploys none. To exercise the full brokering path:
 
 1. Create a Windows 11 VM in `snet-leostream` with no public IP.
 2. Install the Leostream Agent on it, pointing at the Broker on `10.50.1.10`.
-3. In the Broker UI, create a pool containing the VM, a policy that offers it,
+3. Ask a subscription **Owner** or **User Access Administrator** to grant the
+   Broker's managed identity **Virtual Machine Contributor** on
+   `rg-leostream-poc`, then add an Azure center under *Setup > Centers* using
+   **Managed identity** authentication.
+4. In the Broker UI, create a pool containing the VM, a policy that offers it,
    and an assignment that maps your user to that policy.
-4. Connect to the Gateway's public address and sign in as that user.
+5. Connect to the Gateway's public address and sign in as that user.
 
 Bear in mind the VM will be in the same subnet as the Broker and Gateway, and
 `nsg-leostream` allows SSH and HTTPS inbound to the whole subnet from
@@ -221,7 +244,7 @@ Bear in mind the VM will be in the same subnet as the Broker and Gateway, and
 | `SSH public key not found` | Wrong `SshPublicKeyPath` | Generate the key or fix the path |
 | `SkuNotAvailable` | VM size not offered in the region | Change `Size` or `Location` |
 | `OperationNotAllowed ... quota` | Not enough vCPU quota | Request an increase or use smaller sizes |
-| `AuthorizationFailed` on role assignment | Missing User Access Administrator | Get the role, or ask someone who has it to run step 4 |
+| `Forbidden` / `AuthorizationFailed` creating a role assignment | You are granting the Broker identity a role, which needs User Access Administrator or Owner. Many subscriptions also apply an ABAC condition restricting *which* roles you may assign | Not needed for this PoC — no role assignment is required. Only relevant when adding desktops; ask a subscription Owner |
 | RunCommand times out | Guest agent not ready yet | Wait a few minutes after VM creation, then retry |
 | Installer download fails in the VM | URL expired or needs authentication | Generate a fresh pre-signed HTTPS URL |
 | SSH connection hangs | Your IP is not in `AllowedClientCidrs` | Add it and re-run `Deploy-LeostreamPoC.ps1` |

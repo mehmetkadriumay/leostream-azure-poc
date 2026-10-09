@@ -81,14 +81,6 @@
         SshPublicKeyPath = '~/.ssh/id_rsa.pub'
     }
 
-    Rbac = @{
-        # Role granted to the Broker's system-assigned managed identity so it
-        # can discover, start and stop VMs in the resource group.
-        RoleDefinitionName = 'Virtual Machine Contributor'
-        # Scope: 'ResourceGroup' or 'Subscription'
-        Scope              = 'ResourceGroup'
-    }
-
     Ports = @{
         Https = 443
         Ssh   = 22

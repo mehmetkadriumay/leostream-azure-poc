@@ -24,7 +24,6 @@ fails.
 | Security | `leo-broker-01` is private only | No public IP on its NIC |
 | Security | `leo-gateway-01` has the expected public IP | Exactly one, as designed |
 | Identity | Broker managed identity | System-assigned identity with a principal ID |
-| Identity | Broker role assignment | At least one role is assigned to that identity |
 | Network | Gateway public IP assigned | The static IP is allocated |
 | Service | Gateway TCP/443 reachable | Your machine can open 443 |
 | Service | Gateway TCP/22 reachable | Your machine can open 22 |
@@ -39,7 +38,6 @@ fails.
   `systemctl status leostream`.
 * **Skip on the in-VNet check** — RunCommand could not run, usually because the
   guest agent is still starting. Wait and retry.
-* **Fail on the role assignment** — run `Configure-LeostreamAzureRBAC.ps1`.
 
 ## Manual checks
 
@@ -79,16 +77,7 @@ ssh -i $key -L 8443:10.50.1.10:443 $user@$gw
 The Leostream sign-in page should load. The default `admin` / `leo` credentials
 must already have been changed.
 
-### 3. The Azure center sees your VMs
-
-In the Broker UI, *Setup > Centers*, open the Azure center and refresh. It should
-list `leo-broker-01` and `leo-gateway-01`. If it lists nothing, the managed
-identity role assignment is missing or scoped to the wrong resource group.
-
-This is the single most important check in the PoC — it proves the managed
-identity integration end to end, with no stored credential anywhere.
-
-### 4. The Gateway is registered
+### 3. The Gateway is registered
 
 *Setup > Gateways* should show `leo-gateway-01` as reachable.
 
@@ -142,10 +131,11 @@ one yourself:
 * Leostream Agent registration and check-in
 * pools, policies and assignment logic
 * the Broker starting or stopping a desktop VM through its managed identity
+* the Azure center discovering VMs
 
-The last point is partially covered: the identity and its role assignment are
-verified, and the Azure center listing your VMs proves the Broker can read them.
-Only the write path (power control) remains unexercised.
+The last two are not covered at all. The managed identity exists and is
+verified, but it holds no role assignment and no Azure center is configured,
+because this PoC deploys no desktops for either to act on.
 
 ## Record your results
 
@@ -154,7 +144,6 @@ Only the write path (power control) remains unexercised.
 | `Test-LeostreamPoC.ps1` all pass | | | |
 | SSH to Gateway and Broker | | | |
 | Broker UI through the tunnel | | | |
-| Azure center lists VMs | | | |
 | Gateway registered in the Broker | | | |
 | Broker has no public IP | | | |
 | Out-of-CIDR traffic dropped | | | |

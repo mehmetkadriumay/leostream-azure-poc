@@ -366,10 +366,9 @@ $user = $config.Admin.LinuxUsername
 
 Write-Host ''
 Write-Host 'Next steps:' -ForegroundColor Green
-Write-Host '  1. ./Configure-LeostreamAzureRBAC.ps1   # grant the Broker managed identity access'
-Write-Host '  2. ./Install-LeostreamBroker.ps1        # install Leostream Platform 26 on leo-broker-01'
-Write-Host '  3. ./Install-LeostreamGateway.ps1       # install the Leostream Gateway on leo-gateway-01'
-Write-Host '  4. ./Test-LeostreamPoC.ps1              # validate the deployment'
+Write-Host '  1. ./Install-LeostreamBroker.ps1        # install Leostream Platform 26 on leo-broker-01'
+Write-Host '  2. ./Install-LeostreamGateway.ps1       # install the Leostream Gateway on leo-gateway-01'
+Write-Host '  3. ./Test-LeostreamPoC.ps1              # validate the deployment'
 Write-Host ''
 Write-Host 'Administrative access:' -ForegroundColor Green
 Write-Host "  Gateway shell : ssh $user@$gatewayPublicIp"

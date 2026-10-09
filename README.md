@@ -64,9 +64,9 @@ validation scripts both enforce this.
 **No desktops are deployed.** This PoC covers the Leostream control plane only.
 That means the end-to-end user session, Agent registration, pools, policies and
 the Broker starting/stopping a desktop VM are not exercised out of the box. The
-managed identity and its role assignment *are* deployed and verified, so the
-Azure integration itself is proven. To go further, add a Windows VM to the same
-subnet and install the Leostream Agent on it manually.
+Broker's managed identity *is* deployed and verified, but it is intentionally
+left with no role assignment, since there is nothing for it to manage. To go
+further, see [Adding an Azure Center later](#adding-an-azure-center-later).
 
 **No Azure Bastion.** You administer over SSH to the Gateway's public IP and hop
 to the Broker from there. See [Administrative access](#administrative-access).
@@ -90,7 +90,6 @@ leostream-azure-poc/
 │   └── validation.md                # acceptance checks and negative tests
 └── scripts/
     ├── Deploy-LeostreamPoC.ps1          # RG, VNet, 1 subnet, 1 NSG, 2 VMs
-    ├── Configure-LeostreamAzureRBAC.ps1 # managed identity + role assignment
     ├── Install-LeostreamBroker.ps1      # Platform 26 on leo-broker-01
     ├── Install-LeostreamGateway.ps1     # Gateway on leo-gateway-01
     ├── Test-LeostreamPoC.ps1            # validation
@@ -105,7 +104,7 @@ leostream-azure-poc/
 |---|---|
 | PowerShell | Windows PowerShell **5.1** or PowerShell **7.4+** (7.x recommended) |
 | Az modules | `Az.Accounts`, `Az.Resources`, `Az.Network`, `Az.Compute` (11.0+) |
-| Azure permissions | Contributor **and** User Access Administrator (or Owner) on the subscription |
+| Azure permissions | **Contributor** on the subscription or resource group. User Access Administrator is *not* needed — no role assignments are created |
 | Azure quota | ~6 vCPUs of the `Dsv5` family in the target region |
 | SSH key pair | For the two RHEL 9 VMs |
 | Leostream | Evaluation licence plus HTTPS download URLs for the Platform and Gateway installers |
@@ -143,8 +142,8 @@ cd leostream-azure-poc
 # 1. Edit config/poc.config.psd1 - at minimum set AllowedClientCidrs and SshPublicKeyPath
 code config/poc.config.psd1
 
-# 2. Sign in
-Connect-AzAccount
+# 2. Sign in. -Tenant matters if your account is in more than one directory
+Connect-AzAccount -Tenant '<tenant-id>'
 Set-AzContext -Subscription '<subscription-id>'
 
 cd scripts
@@ -153,14 +152,11 @@ cd scripts
 ./Deploy-LeostreamPoC.ps1 -WhatIf
 ./Deploy-LeostreamPoC.ps1 -Verbose
 
-# 4. Grant the Broker managed identity its Azure role
-./Configure-LeostreamAzureRBAC.ps1
-
-# 5. Install the Leostream software (URLs come from your Leostream portal)
+# 4. Install the Leostream software (URLs come from your Leostream portal)
 ./Install-LeostreamBroker.ps1  -InstallerUri 'https://<portal>/<platform-26-installer>'
 ./Install-LeostreamGateway.ps1 -InstallerUri 'https://<portal>/<gateway-installer>'
 
-# 6. Validate
+# 5. Validate
 ./Test-LeostreamPoC.ps1
 ```
 
@@ -180,8 +176,6 @@ Everything is centralised in [`config/poc.config.psd1`](config/poc.config.psd1).
 | `AllowedClientCidrs` | `0.0.0.0/0` | **Always** — narrow to your egress IP |
 | `VirtualMachines.*.Size` | `D4s_v5` / `D2s_v5` | Cost or performance tuning |
 | `Admin.SshPublicKeyPath` | `~/.ssh/id_rsa.pub` | Your key lives elsewhere |
-| `Rbac.RoleDefinitionName` | `Virtual Machine Contributor` | Broker needs broader or narrower rights |
-| `Rbac.Scope` | `ResourceGroup` | Broker must manage VMs subscription-wide |
 
 The deployment script prints a warning if `AllowedClientCidrs` still contains
 `0.0.0.0/0`. That default leaves SSH open to the internet — change it.
@@ -216,19 +210,7 @@ Creates, idempotently:
 Re-running skips anything that already exists. It finishes by printing the
 Gateway's public IP and the exact SSH commands for administration.
 
-### 2. RBAC — `Configure-LeostreamAzureRBAC.ps1`
-
-Confirms the Broker's system-assigned managed identity and assigns
-**Virtual Machine Contributor** at resource group scope, retrying while Entra ID
-replicates. It then prints the subscription, tenant and resource group values you
-need in the Broker UI.
-
-```powershell
-./Configure-LeostreamAzureRBAC.ps1
-./Configure-LeostreamAzureRBAC.ps1 -Scope Subscription -RoleDefinitionName 'Contributor'
-```
-
-### 3–4. Software installation
+### 2–3. Software installation
 
 The installers run through the **Azure RunCommand extension**, so the Broker
 never needs inbound connectivity from the internet.
@@ -402,16 +384,28 @@ Open the Broker UI through the SSH tunnel above, then:
 
 1. Sign in as `admin` / `leo` and **change the password immediately**.
 2. *System > License* — apply your evaluation licence.
-3. *Setup > Centers > Add Center > Azure* — authentication **Managed identity**,
-   with the subscription, tenant and resource group printed by the RBAC script.
-4. *Setup > Gateways* — register `leo-gateway-01` (public address for clients,
+3. *Setup > Gateways* — register `leo-gateway-01` (public address for clients,
    `10.50.1.20` privately).
-5. *Configuration > Protocol Plans* — RDP via the Gateway.
+4. *Configuration > Protocol Plans* — RDP via the Gateway.
 
-Steps 1–5 are all this PoC exercises. Pools, policies and assignments need at
-least one desktop: add a Windows VM to `snet-leostream`, install the Leostream
-Agent on it pointing at `10.50.1.10`, then continue with *Configuration > Pools*,
-*Policies* and *Assignments*.
+Steps 1–4 are all this PoC exercises.
+
+### Adding an Azure Center later
+
+This PoC does **not** configure *Setup > Centers*, because a Center exists to
+discover and power-manage desktop VMs and there are none here. The Broker is
+still deployed with a system-assigned managed identity, so the groundwork is
+done. To add desktops later:
+
+1. Add a Windows VM to `snet-leostream` and install the Leostream Agent on it,
+   pointing at `10.50.1.10`.
+2. Have someone with **User Access Administrator** or **Owner** grant the
+   Broker's managed identity **Virtual Machine Contributor** on
+   `rg-leostream-poc`. Ordinary Contributor rights cannot grant roles, and many
+   subscriptions further restrict which roles you may assign.
+3. In the Broker UI, *Setup > Centers > Add Center > Azure*, authentication
+   **Managed identity**, then continue with *Configuration > Pools*, *Policies*
+   and *Assignments*.
 
 ---
 
@@ -424,9 +418,9 @@ Agent on it pointing at `10.50.1.10`, then continue with *Configuration > Pools*
 
 Checks the resource group, VNet and subnet prefix, NSG attachment and both
 inbound rules, that Broker and Gateway are separate VMs, that both are running,
-that only the Gateway is internet-facing, that the Broker has a managed identity
-with a role assignment, and that the Gateway responds on 443 and 22 while the
-Broker responds on 443 from inside the VNet. Exits `1` on any failure.
+that only the Gateway is internet-facing, that the Broker has a managed
+identity, and that the Gateway responds on 443 and 22 while the Broker responds
+on 443 from inside the VNet. Exits `1` on any failure.
 
 Manual end-to-end and negative tests: [docs/validation.md](docs/validation.md).
 
@@ -436,10 +430,10 @@ Manual end-to-end and negative tests: [docs/validation.md](docs/validation.md).
 
 | Symptom | Likely cause | Fix |
 |---|---|---|
+| Target subscription missing after sign-in, or `Set-AzContext` cannot find it | You authenticated against your home tenant, but the subscription lives in another | `Get-AzSubscription \| Format-Table Name, Id, TenantId`, then re-run `Connect-AzAccount -Tenant '<that-id>'` |
 | `SSH public key not found at ...` | `Admin.SshPublicKeyPath` is wrong | Generate a key or correct the path in `poc.config.psd1` |
 | `New-AzVM: ... SkuNotAvailable` | VM size unavailable in the region | Change `VirtualMachines.*.Size` or `Azure.Location` |
 | `OperationNotAllowed ... quota` | Insufficient vCPU quota | Request a quota increase or use smaller sizes |
-| `New-AzRoleAssignment` fails repeatedly | No User Access Administrator rights, or replication lag | Get the rights; the script already retries for ~2 minutes |
 | `Invoke-AzVMRunCommand` times out | VM agent not ready | Wait a few minutes after VM creation and retry |
 | Installer download fails inside the VM | URL expired, needs auth, or is not HTTPS | Use a fresh pre-signed HTTPS URL |
 | SSH to the Gateway hangs | Your IP is not in `AllowedClientCidrs` | Add it, then re-run `Deploy-LeostreamPoC.ps1` to update the NSG |
@@ -447,7 +441,7 @@ Manual end-to-end and negative tests: [docs/validation.md](docs/validation.md).
 | Cannot SSH to the Broker directly | Working as designed — it has no public IP | Use `ssh -J` through the Gateway |
 | Certificate warning on the Gateway | Self-signed certificate | Install a trusted certificate before any real use |
 | No desktops offered to any user | Working as designed — this PoC deploys none | Add a VM to the subnet and install the Leostream Agent |
-| Broker cannot see Azure VMs | Role assignment missing or wrong scope | Re-run `Configure-LeostreamAzureRBAC.ps1` |
+| Broker cannot see Azure VMs | Working as designed — no Azure Center is configured and no desktops exist | See *Adding an Azure Center later* above |
 
 Useful diagnostics:
 
@@ -477,8 +471,9 @@ Get-AzEffectiveNetworkSecurityGroup -ResourceGroupName $rg -NetworkInterfaceName
 ```
 
 The script refuses to touch a resource group that is not tagged
-`project=leostream-poc` unless `-Force` is given, and it removes the Broker
-identity's role assignments so none are orphaned.
+`project=leostream-poc` unless `-Force` is given. It also clears any role
+assignments held by the Broker's managed identity, so that nothing is left
+orphaned if you granted it one while adding desktops.
 
 Release your Leostream licence seats afterwards.
 
