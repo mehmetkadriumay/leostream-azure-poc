@@ -230,23 +230,128 @@ Full walkthrough: [docs/installation.md](docs/installation.md).
 There is no Bastion and no jump host. The Gateway's public IP is the single way
 in, and it only accepts connections from `AllowedClientCidrs`.
 
+### Where to run these commands
+
+**Run everything in this section on your own Windows PC, in PowerShell.** Not in
+the Azure portal's Cloud Shell, and not inside either VM.
+
+| Command type | Where it runs | Prompt looks like |
+|---|---|---|
+| `.ps1` scripts, `Get-Az*`, and every `ssh` command below | Your Windows PC, PowerShell | `PS C:\Users\you\leostream-azure-poc>` |
+| `systemctl`, `firewall-cmd`, `dnf` | Inside a VM, after you have SSH'd in | `[leoadmin@leo-gateway-01 ~]$` |
+
+This matters more than it sounds. `-J` and `-L` are instructions to *your local*
+SSH client about how to route a connection out of your machine, so they only make
+sense there. Your private key also only exists on your PC and should never be
+copied to a VM.
+
+Two symptoms that mean you are in the wrong shell:
+
+| Error | What happened |
+|---|---|
+| `Identity file /home/leoadmin.sshleostream_poc not accessible` | You ran it inside a VM. Bash expanded `$HOME` to the Linux home directory and silently ate the `\` characters in the Windows path. Type `exit` to get back to PowerShell. |
+| `ssh: Could not resolve hostname $gw` | You ran it in a bash shell, where PowerShell variables do not exist. |
+
+### Prerequisites on your PC
+
+* **OpenSSH client** — built into Windows 10 1803+ and Windows 11. Check with
+  `ssh -V`; you need 7.3 or newer for `-J`. Windows 11 ships 9.x.
+* **The private key** you generated in the prerequisites, at
+  `C:\Users\<you>\.ssh\leostream_poc`. The deployment put the matching `.pub` on
+  both VMs.
+* **Your current public IP inside `AllowedClientCidrs`.** If your ISP changed it,
+  update the config and re-run `Deploy-LeostreamPoC.ps1` to refresh the NSG.
+
+### Step 1 — get the Gateway's public IP
+
+`Deploy-LeostreamPoC.ps1` prints this when it finishes, but do not hard-code it
+or retype it. Fetch it from Azure, from the repository root:
+
 ```powershell
-$gw = '<gateway-public-ip>'      # printed by Deploy-LeostreamPoC.ps1
-
-# Gateway shell
-ssh -i $HOME\.ssh\leostream_poc leoadmin@$gw
-
-# Broker shell, hopping through the Gateway
-ssh -i $HOME\.ssh\leostream_poc -J leoadmin@$gw leoadmin@10.50.1.10
-
-# Broker web UI, tunnelled through the Gateway
-ssh -i $HOME\.ssh\leostream_poc -L 8443:10.50.1.10:443 leoadmin@$gw
-# then browse to https://localhost:8443/
+cd C:\path\to\leostream-azure-poc
+$rg = (Import-PowerShellDataFile ./config/poc.config.psd1).Azure.ResourceGroupName
+$gw = (Get-AzPublicIpAddress -ResourceGroupName $rg -Name pip-leo-gateway-01).IpAddress
+$gw     # ALWAYS check this before using it - it must print an IP address
 ```
 
-If you would rather not open SSH at all, remove the `Allow-SSH-Inbound` rule and
-drive both VMs with `Invoke-AzVMRunCommand`, which needs no inbound access. You
-then lose the Broker web UI, which you need for the initial Leostream setup.
+If `$gw` comes back blank, stop. An unset variable in PowerShell expands to an
+empty string instead of raising an error, which produces confusing failures two
+commands later, such as `Invalid -J argument`. A blank value means the public IP
+does not exist yet, or you are in the wrong subscription.
+
+PowerShell variables are **per window**. Open a new terminal and `$gw` is empty
+again, so re-run the three lines above each time.
+
+### Step 2 — open a shell on the Gateway
+
+```powershell
+ssh -i $HOME\.ssh\leostream_poc leoadmin@$gw
+```
+
+Expect a host-key prompt on first connection; type `yes`. You should land at
+`[leoadmin@leo-gateway-01 ~]$` with no password prompt. Type `exit` to return.
+
+Get this working before trying anything below — the other two commands both
+depend on it.
+
+### Step 3 — open a shell on the Broker
+
+The Broker has no public IP, so SSH hops through the Gateway in a single command
+using `-J` (ProxyJump). Still run this **on your PC**, not on the Gateway:
+
+```powershell
+ssh -i $HOME\.ssh\leostream_poc -J leoadmin@$gw leoadmin@10.50.1.10
+```
+
+You should land at `[leoadmin@leo-broker-01 ~]$`. Your key is used twice, for
+both hops, and is never copied to the Gateway.
+
+### Step 4 — reach the Broker web UI
+
+The Broker's console is on port 443 of a private address, so forward a local port
+through the Gateway with `-L`:
+
+```powershell
+ssh -i $HOME\.ssh\leostream_poc -L 8443:10.50.1.10:443 leoadmin@$gw
+```
+
+**Leave that window open** — closing it closes the tunnel. In a browser on the
+same PC, go to:
+
+```
+https://localhost:8443/
+```
+
+Accept the self-signed certificate warning. `-L 8443:10.50.1.10:443` reads as:
+listen on port 8443 on this PC, and forward anything arriving there to
+`10.50.1.10:443` as seen from the Gateway. Use a different local port if 8443 is
+already taken.
+
+### If something fails
+
+| Symptom | Cause | Fix |
+|---|---|---|
+| `Invalid -J argument` | `$gw` is empty | Re-run step 1 and confirm `$gw` prints an IP |
+| Connection hangs, then times out | Your IP is not in `AllowedClientCidrs` | Check with `(Invoke-RestMethod https://api.ipify.org?format=json).ip`, add it to the config, re-run `Deploy-LeostreamPoC.ps1` |
+| `Permission denied (publickey)` | Wrong key path or wrong username | Confirm the file after `-i` exists, and that the user matches `Admin.LinuxUsername` |
+| `Identity file ... not accessible` with a mangled path | Running in bash, not PowerShell | `exit` back to PowerShell |
+| Step 2 works but step 3 hangs | Broker VM is stopped or still booting | `Get-AzVM -ResourceGroupName $rg -Name leo-broker-01 -Status` |
+| Browser shows `ERR_CONNECTION_REFUSED` on localhost:8443 | Tunnel window closed, or the Broker software is not installed yet | Reopen the tunnel; check `systemctl status leostream` on the Broker |
+| `WARNING: UNPROTECTED PRIVATE KEY FILE` | Key file permissions too open | `icacls $HOME\.ssh\leostream_poc /inheritance:r /grant:r "$($env:USERNAME):(R)"` |
+
+### Avoiding SSH entirely
+
+If you would rather not open port 22 at all, delete the `Allow-SSH-Inbound` rule
+and drive both VMs with `Invoke-AzVMRunCommand`, which reaches them through the
+Azure control plane and needs no inbound access:
+
+```powershell
+Invoke-AzVMRunCommand -ResourceGroupName $rg -VMName leo-broker-01 `
+    -CommandId RunShellScript -ScriptString 'systemctl status leostream --no-pager'
+```
+
+You then lose the Broker web UI, which you need for the initial Leostream setup,
+so this suits an already-configured deployment rather than a fresh one.
 
 ---
 

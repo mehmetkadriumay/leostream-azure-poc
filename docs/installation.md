@@ -129,15 +129,37 @@ Override it with `-BrokerAddress` if you changed the addressing.
 
 ## 7. Configure Leostream
 
-Open the Broker UI through an SSH tunnel on the Gateway:
+### Reaching the Broker console
+
+The Broker has no public IP, so forward a local port to it through the Gateway.
+
+**Run this on your own Windows PC, in PowerShell** — not in Cloud Shell and not
+inside either VM. `-L` is an instruction to your local SSH client, and your
+private key only exists on your PC. If you see an error mentioning a path like
+`/home/leoadmin.sshleostream_poc`, you are in a bash shell inside a VM; type
+`exit` first.
 
 ```powershell
-$gw = '<gateway-public-ip>'
+cd C:\path\to\leostream-azure-poc
+$rg = (Import-PowerShellDataFile ./config/poc.config.psd1).Azure.ResourceGroupName
+$gw = (Get-AzPublicIpAddress -ResourceGroupName $rg -Name pip-leo-gateway-01).IpAddress
+$gw     # must print an IP address - if it is blank, stop and investigate
+
 ssh -i $HOME\.ssh\leostream_poc -L 8443:10.50.1.10:443 leoadmin@$gw
 ```
 
-Leave that session open and browse to `https://localhost:8443/`. Accept the
-self-signed certificate warning.
+Check `$gw` every time. PowerShell expands an unset variable to an empty string
+rather than failing, which surfaces later as a confusing error such as
+`Invalid -J argument`. Variables are also per-window, so re-run those lines in
+each new terminal.
+
+**Leave that SSH window open** — it *is* the tunnel. In a browser on the same PC,
+browse to `https://localhost:8443/` and accept the self-signed certificate
+warning.
+
+Full details, including the `ssh -J` form for a Broker shell and a
+symptom-by-symptom troubleshooting table, are in the
+[Administrative access](../README.md#administrative-access) section of the README.
 
 1. **Sign in** as `admin` / `leo`, then change the password immediately.
 2. **System > License** — apply your evaluation licence.

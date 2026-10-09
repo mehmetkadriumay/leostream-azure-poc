@@ -1,5 +1,5 @@
 #Requires -Version 5.1
-#Requires -Modules Az.Accounts, Az.Compute
+#Requires -Modules Az.Accounts, Az.Compute, Az.Network
 
 <#
 .SYNOPSIS
@@ -160,9 +160,13 @@ if ($PSCmdlet.ShouldProcess($spec.Name, 'Install Leostream Platform 26')) {
     }
 }
 
+$gatewayAddress = '<gateway-public-ip>'
+$gatewayPip = Get-AzPublicIpAddress -ResourceGroupName $rgName -Name $config.VirtualMachines.Gateway.PublicIpName -ErrorAction SilentlyContinue
+if ($gatewayPip -and $gatewayPip.IpAddress) { $gatewayAddress = $gatewayPip.IpAddress }
+
 Write-Host ''
 Write-Host "Broker private address: https://$($spec.PrivateIp)/" -ForegroundColor Green
-Write-Host 'Reach it by tunnelling through the Gateway:' -ForegroundColor Green
-Write-Host "  ssh -L 8443:$($spec.PrivateIp):443 $($config.Admin.LinuxUsername)@<gateway-public-ip>" -ForegroundColor Green
-Write-Host '  then browse to https://localhost:8443/' -ForegroundColor Green
+Write-Host 'Reach it from a PowerShell prompt on your own PC by tunnelling through the Gateway:' -ForegroundColor Green
+Write-Host "  ssh -L 8443:$($spec.PrivateIp):443 $($config.Admin.LinuxUsername)@$gatewayAddress" -ForegroundColor Green
+Write-Host '  leave that window open, then browse to https://localhost:8443/' -ForegroundColor Green
 Write-Host 'Default Leostream administrator account: admin / leo (change it immediately).' -ForegroundColor Yellow

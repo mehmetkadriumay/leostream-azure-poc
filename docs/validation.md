@@ -47,19 +47,27 @@ The script cannot verify these. Do them once by hand.
 
 ### 1. Administrative access works
 
+Run these on your own Windows PC in PowerShell, from the repository root — not
+inside either VM. See
+[Administrative access](../README.md#administrative-access) if anything fails.
+
 ```powershell
-$gw = '<gateway-public-ip>'
+$rg = (Import-PowerShellDataFile ./config/poc.config.psd1).Azure.ResourceGroupName
+$gw = (Get-AzPublicIpAddress -ResourceGroupName $rg -Name pip-leo-gateway-01).IpAddress
+$gw     # must print an IP address
+
 ssh -i $HOME\.ssh\leostream_poc leoadmin@$gw                            # Gateway
 ssh -i $HOME\.ssh\leostream_poc -J leoadmin@$gw leoadmin@10.50.1.10     # Broker
 ```
 
-Both should land you at a shell prompt without a password.
+Both should land you at a shell prompt without a password — `[leoadmin@leo-gateway-01 ~]$`
+and `[leoadmin@leo-broker-01 ~]$` respectively. `exit` returns to PowerShell.
 
 ### 2. Broker UI is reachable and only through the tunnel
 
 ```powershell
 ssh -i $HOME\.ssh\leostream_poc -L 8443:10.50.1.10:443 leoadmin@$gw
-# browse to https://localhost:8443/
+# leave this window open, then browse to https://localhost:8443/
 ```
 
 The Leostream sign-in page should load. The default `admin` / `leo` credentials
@@ -85,7 +93,7 @@ Worth running to prove the security posture is real, not assumed.
 ### The Broker is not reachable from the internet
 
 ```powershell
-Test-NetConnection -ComputerName <gateway-public-ip> -Port 443   # expect success
+Test-NetConnection -ComputerName $gw -Port 443   # expect success
 ```
 
 There is no public address to test against for the Broker — confirm with:
