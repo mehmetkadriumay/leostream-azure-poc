@@ -200,16 +200,24 @@ ssh -i $key -L 8443:10.50.1.10:443 $user@$gw
 
 Check both values every time. PowerShell expands an unset variable to an empty
 string rather than failing, which surfaces later as a confusing error such as
-`Invalid -J argument` or `Identity file ... not accessible`. Variables are also
-per-window, so re-run those lines in each new terminal.
+`Identity file ... not accessible` or a hang. Variables are also per-window, so
+re-run those lines in each new terminal.
+
+`Test-Path $key` printing `True` only means *a* key is there — not that it is
+the right one. The key the VMs accept is whichever one was configured when they
+were **created**, which may differ if you deployed from another clone of this
+repo. If SSH is refused, run the snippet in
+[Checking which key is actually deployed](../README.md#checking-which-key-is-actually-deployed).
 
 **Leave that SSH window open** — it *is* the tunnel. In a browser on the same PC,
 browse to `https://localhost:8443/` and accept the self-signed certificate
 warning.
 
-Full details, including the `ssh -J` form for a Broker shell and a
+Full details, including how to open a Broker *shell* through the Gateway and a
 symptom-by-symptom troubleshooting table, are in the
 [Administrative access](../README.md#administrative-access) section of the README.
+Note that the obvious `ssh -i $key -J $user@$gw ...` does **not** work with a
+non-default key name — the README explains why and gives two forms that do.
 
 1. **Sign in** as `admin` / `leo`, then change the password immediately.
 2. **System > License** — apply your evaluation licence.

@@ -362,7 +362,9 @@ if ($gatewayPip) {
     GatewayFqdn      = $gatewayFqdn
 } | Format-List
 
-$user = $config.Admin.LinuxUsername
+$user      = $config.Admin.LinuxUsername
+$brokerIp  = $brokerSpec.PrivateIp
+$key       = $config.Admin.SshPublicKeyPath -replace '^~', $HOME -replace '\.pub$', ''
 
 Write-Host ''
 Write-Host 'Next steps:' -ForegroundColor Green
@@ -370,10 +372,15 @@ Write-Host '  1. ./Install-LeostreamBroker.ps1        # install Leostream Platfo
 Write-Host '  2. ./Install-LeostreamGateway.ps1       # install the Leostream Gateway on leo-gateway-01'
 Write-Host '  3. ./Test-LeostreamPoC.ps1              # validate the deployment'
 Write-Host ''
-Write-Host 'Administrative access:' -ForegroundColor Green
-Write-Host "  Gateway shell : ssh $user@$gatewayPublicIp"
-Write-Host "  Broker shell  : ssh -J $user@$gatewayPublicIp $user@$($brokerSpec.PrivateIp)"
-Write-Host "  Broker web UI : ssh -L 8443:$($brokerSpec.PrivateIp):443 $user@$gatewayPublicIp"
+Write-Host 'Administrative access (run on this PC, not inside a VM):' -ForegroundColor Green
+Write-Host "  Gateway shell : ssh -i `"$key`" $user@$gatewayPublicIp"
+$proxyOpt = '-o "ProxyCommand=ssh -i `"' + $key + '`" -W %h:%p ' + "$user@$gatewayPublicIp" + '"'
+Write-Host "  Broker shell  : ssh -i `"$key`" $proxyOpt $user@$brokerIp"
+Write-Host "  Broker web UI : ssh -i `"$key`" -L 8443:${brokerIp}:443 $user@$gatewayPublicIp"
 Write-Host '                  then browse to https://localhost:8443/'
+Write-Host ''
+Write-Host '  The Broker command avoids "-J" on purpose: with -J the -i key is not' -ForegroundColor DarkGray
+Write-Host '  offered to the Gateway, so the hop is refused. See the README section' -ForegroundColor DarkGray
+Write-Host '  "Administrative access" for a tidier ~/.ssh/config alternative.' -ForegroundColor DarkGray
 
 #endregion

@@ -61,11 +61,25 @@ $gw                # must print an IP address
 Test-Path $key     # must print True
 
 ssh -i $key $user@$gw                            # Gateway
-ssh -i $key -J $user@$gw $user@10.50.1.10        # Broker
+
+# Broker, hopping through the Gateway
+ssh -i $key -o "ProxyCommand=ssh -i `"$key`" -W %h:%p $user@$gw" $user@10.50.1.10
 ```
 
 Both should land you at a shell prompt without a password — `[leoadmin@leo-gateway-01 ~]$`
 and `[leoadmin@leo-broker-01 ~]$` respectively. `exit` returns to PowerShell.
+
+Two things that commonly trip people up here:
+
+- The Broker command deliberately does **not** use `-J`. With `-J`, the `-i` key
+  is applied only to the final hop, so the connection to the Gateway fails with
+  `Permission denied` even though the line above it just succeeded. See
+  [Administrative access](../README.md#administrative-access) for the `~/.ssh/config`
+  alternative, which is less to type.
+- `$key` above is only a guess derived from the config file. The key that
+  actually works is the one that was present when the VMs were **created**. If
+  either command is refused, run the snippet in
+  [Checking which key is actually deployed](../README.md#checking-which-key-is-actually-deployed).
 
 ### 2. Broker UI is reachable and only through the tunnel
 

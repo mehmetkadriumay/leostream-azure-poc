@@ -338,15 +338,57 @@ depend on it.
 
 ### Step 3 — open a shell on the Broker
 
-The Broker has no public IP, so SSH hops through the Gateway in a single command
-using `-J` (ProxyJump). Still run this **on your PC**, not on the Gateway:
+The Broker has no public IP, so SSH hops through the Gateway. Run this **on your
+PC**, not on the Gateway:
 
 ```powershell
-ssh -i $key -J $user@$gw $user@10.50.1.10
+ssh -i $key -o "ProxyCommand=ssh -i `"$key`" -W %h:%p $user@$gw" $user@10.50.1.10
 ```
 
 You should land at `[leoadmin@leo-broker-01 ~]$`. Your key is used twice, for
 both hops, and is never copied to the Gateway.
+
+> **Why not the shorter `ssh -i $key -J $user@$gw $user@10.50.1.10`?**
+> Because `-i` applies only to the **final** connection. The jump host is a
+> separate SSH process that does not inherit it, so it falls back to the default
+> key names (`id_rsa`, `id_ed25519`). If your key is called anything else, the
+> jump fails with `Permission denied (publickey...)` — confusingly pointing at
+> the *Gateway* address even though your key is fine. Specifying
+> `-o IdentityFile=` instead does not help; it has the same scope. `-J` is only
+> safe when your key has a default name or is loaded into `ssh-agent`.
+
+#### Easier: name the hosts once
+
+Rather than retyping the above, add this to `~\.ssh\config` (create the file if
+it does not exist, no extension). Set `IdentityFile` to your key and `HostName`
+to the Gateway's current public IP:
+
+```sshconfig
+Host leo-gateway
+    HostName 20.0.0.1
+    User leoadmin
+    IdentityFile ~/.ssh/id_rsa
+    IdentitiesOnly yes
+
+Host leo-broker
+    HostName 10.50.1.10
+    User leoadmin
+    IdentityFile ~/.ssh/id_rsa
+    IdentitiesOnly yes
+    ProxyJump leo-gateway
+```
+
+Then both hosts are reachable by name, from any directory, with no variables:
+
+```powershell
+ssh leo-gateway
+ssh leo-broker
+ssh -L 8443:10.50.1.10:443 leo-gateway    # the web UI tunnel
+```
+
+`ProxyJump` works correctly here because the config supplies `IdentityFile` to
+each host in its own right. Remember to update `HostName` if you redeploy and
+the Gateway's public IP changes.
 
 ### Step 4 — reach the Broker web UI
 
@@ -376,13 +418,46 @@ already taken.
 | `Invalid -J argument` | `$gw` is empty | Re-run step 1 and confirm `$gw` prints an IP |
 | `Identity file ... not accessible: No such file or directory` | The key named in `-i` does not exist. Usually you generated `leostream_poc` but left `Admin.SshPublicKeyPath` at the default `~/.ssh/id_rsa.pub`, or the reverse | `Get-ChildItem $HOME\.ssh` to see what you actually have, then make the config and the `-i` path agree. Step 1 derives `$key` correctly |
 | Connection hangs, then times out | Your IP is not in `AllowedClientCidrs` | Check with `(Invoke-RestMethod https://api.ipify.org?format=json).ip`, add it to the config, re-run `Deploy-LeostreamPoC.ps1` |
-| `Permission denied (publickey)` | You are offering a different key from the one deployed, or the wrong username | Compare them: `(Get-AzVM -ResourceGroupName $rg -Name leo-gateway-01).OSProfile.LinuxConfiguration.Ssh.PublicKeys[0].KeyData` against `Get-Content "$key.pub"` |
+| `Permission denied (publickey)` | You are offering a different key from the one deployed, or the wrong username | Compare them — see *Checking which key is actually deployed* below |
+| `Permission denied (publickey)` naming the **Gateway** even though step 2 works | You used `-J`, and `-i` does not reach the jump host | Use the `ProxyCommand` form or the `~\.ssh\config` entry in step 3 |
+| Key works on one VM but not the other | The VMs were deployed at different times, or from different clones of this repo, with different `SshPublicKeyPath` values | Compare both VMs with the snippet below. Changing the config does **not** re-key an existing VM |
 | `Identity file ... not accessible` with a mangled path like `/home/leoadmin.sshleostream_poc` | Running in bash inside a VM, not PowerShell. Bash expanded `$HOME` to the Linux home and ate the `\` characters | `exit` back to PowerShell |
 | Step 2 works but step 3 hangs | Broker VM is stopped or still booting | `Get-AzVM -ResourceGroupName $rg -Name leo-broker-01 -Status` |
 | Browser shows `ERR_CONNECTION_REFUSED` on localhost:8443 | Tunnel window closed, or the Broker software is not installed yet | Reopen the tunnel; check `systemctl status leostream` on the Broker |
 | `WARNING: UNPROTECTED PRIVATE KEY FILE` | Key file permissions too open | `icacls $key /inheritance:r /grant:r "$($env:USERNAME):(R)"` |
 
-### Avoiding SSH entirely
+### Checking which key is actually deployed
+
+The public key is written into the VM **when it is created**. Editing
+`Admin.SshPublicKeyPath` afterwards changes nothing on a VM that already
+exists, and `Deploy-LeostreamPoC.ps1` skips VMs it finds — so a redeploy will
+not re-key them either. If you have more than one clone of this repo, each with
+its own config, it is easy to end up with VMs that expect different keys.
+
+This compares every VM against every key you hold and tells you which to use:
+
+```powershell
+$rg = (Import-PowerShellDataFile ./config/poc.config.psd1).Azure.ResourceGroupName
+
+foreach ($vm in Get-AzVM -ResourceGroupName $rg) {
+    $deployed = @($vm.OSProfile.LinuxConfiguration.Ssh.PublicKeys)[0].KeyData.Trim()
+    $match = Get-ChildItem $HOME\.ssh -Filter *.pub |
+        Where-Object { (Get-Content $_.FullName -Raw).Trim() -eq $deployed } |
+        Select-Object -First 1
+
+    $useKey = 'NO LOCAL MATCH'
+    if ($match) { $useKey = $match.FullName -replace '\.pub$', '' }
+
+    [pscustomobject]@{
+        VM     = $vm.Name
+        User   = $vm.OSProfile.AdminUsername
+        UseKey = $useKey
+    }
+}
+```
+
+If a VM reports `NO LOCAL MATCH`, you do not hold its private key. Either find
+the key it was built with, or delete and redeploy that VM.
 
 If you would rather not open port 22 at all, delete the `Allow-SSH-Inbound` rule
 and drive both VMs with `Invoke-AzVMRunCommand`, which reaches them through the
