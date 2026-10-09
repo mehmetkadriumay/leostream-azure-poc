@@ -348,6 +348,32 @@ ssh -i $key -o "ProxyCommand=ssh -i `"$key`" -W %h:%p $user@$gw" $user@10.50.1.1
 You should land at `[leoadmin@leo-broker-01 ~]$`. Your key is used twice, for
 both hops, and is never copied to the Gateway.
 
+> **Do not SSH to the Gateway first and then run `ssh leoadmin@10.50.1.10` from
+> its shell.** That is the natural thing to try, and it always fails with
+> `Permission denied (publickey,gssapi-keyex,gssapi-with-mic)` followed by
+> `Connection closed by UNKNOWN port 65535`.
+>
+> The reason is that there is no private key on the Gateway, and there should
+> not be. The deployment installs only your **public** key, into
+> `/home/leoadmin/.ssh/authorized_keys` on each VM. Both VMs get the same public
+> key, so the Gateway can *prove nothing* to the Broker — it has no private half
+> to authenticate with. You can confirm this on the Gateway:
+>
+> ```bash
+> ls -la ~/.ssh/          # authorized_keys only; no id_* and no leostream_poc
+> ```
+>
+> The `ProxyCommand` above exists precisely to avoid this. The Gateway merely
+> forwards the raw TCP stream (`-W`); the key stays on your PC and your PC
+> authenticates directly to the Broker through that tunnel.
+>
+> Copying your private key onto the Gateway would "fix" it, but don't: the
+> Gateway is the one internet-facing machine here, and a private key there is a
+> single compromise away from granting access to everything else. If you really
+> want to hop from inside the Gateway, use agent forwarding (`ssh -A`) instead,
+> which keeps the key on your PC — this needs the `ssh-agent` service running
+> and your key added with `ssh-add`.
+
 > **Why not the shorter `ssh -i $key -J $user@$gw $user@10.50.1.10`?**
 > Because `-i` applies only to the **final** connection. The jump host is a
 > separate SSH process that does not inherit it, so it falls back to the default
@@ -420,6 +446,8 @@ already taken.
 | Connection hangs, then times out | Your IP is not in `AllowedClientCidrs` | Check with `(Invoke-RestMethod https://api.ipify.org?format=json).ip`, add it to the config, re-run `Deploy-LeostreamPoC.ps1` |
 | `Permission denied (publickey)` | You are offering a different key from the one deployed, or the wrong username | Compare them — see *Checking which key is actually deployed* below |
 | `Permission denied (publickey)` naming the **Gateway** even though step 2 works | You used `-J`, and `-i` does not reach the jump host | Use the `ProxyCommand` form or the `~\.ssh\config` entry in step 3 |
+| `Permission denied (publickey,gssapi-keyex,gssapi-with-mic)` then `Connection closed by UNKNOWN port 65535`, when run **from the Gateway's shell** | There is no private key on the Gateway, by design — only your public key in `authorized_keys`. The Gateway cannot authenticate to the Broker on your behalf | Don't hop from inside the Gateway. Run the step 3 `ProxyCommand` from your PC instead. See the callout in step 3 |
+| You went looking for your key in `/home/leoadmin/.ssh` on a VM and it isn't there | Correct and expected. Private keys never leave your PC; VMs hold only `authorized_keys` | Nothing to fix — use step 3 from your PC |
 | Key works on one VM but not the other | The VMs were deployed at different times, or from different clones of this repo, with different `SshPublicKeyPath` values | Compare both VMs with the snippet below. Changing the config does **not** re-key an existing VM |
 | `Identity file ... not accessible` with a mangled path like `/home/leoadmin.sshleostream_poc` | Running in bash inside a VM, not PowerShell. Bash expanded `$HOME` to the Linux home and ate the `\` characters | `exit` back to PowerShell |
 | Step 2 works but step 3 hangs | Broker VM is stopped or still booting | `Get-AzVM -ResourceGroupName $rg -Name leo-broker-01 -Status` |
