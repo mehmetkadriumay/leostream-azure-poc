@@ -112,8 +112,25 @@ leostream-azure-poc/
 
 ```powershell
 Install-Module Az -Scope CurrentUser -Repository PSGallery -Force
-ssh-keygen -t ed25519 -C "leostream-poc" -f $HOME\.ssh\leostream_poc
 ```
+
+For the SSH key you have two options:
+
+```powershell
+# Option A - reuse your existing default key. Nothing else to change;
+# poc.config.psd1 already points at ~/.ssh/id_rsa.pub.
+Get-ChildItem $HOME\.ssh\id_rsa.pub
+
+# Option B - generate a key dedicated to this PoC...
+ssh-keygen -t ed25519 -C "leostream-poc" -f $HOME\.ssh\leostream_poc
+# ...and then set this in config/poc.config.psd1 BEFORE deploying:
+#   SshPublicKeyPath = '~/.ssh/leostream_poc.pub'
+```
+
+Whichever you choose, `Admin.SshPublicKeyPath` in the config must point at the
+**public** key (`.pub`), and the matching **private** key is what you pass to
+`ssh -i` later. If the two disagree you will deploy one key and authenticate with
+another, which fails with `Permission denied (publickey)`.
 
 ---
 
@@ -256,40 +273,63 @@ Two symptoms that mean you are in the wrong shell:
 
 * **OpenSSH client** — built into Windows 10 1803+ and Windows 11. Check with
   `ssh -V`; you need 7.3 or newer for `-J`. Windows 11 ships 9.x.
-* **The private key** you generated in the prerequisites, at
-  `C:\Users\<you>\.ssh\leostream_poc`. The deployment put the matching `.pub` on
-  both VMs.
+* **The private key whose public half you deployed.** This is whatever
+  `Admin.SshPublicKeyPath` pointed at when you ran `Deploy-LeostreamPoC.ps1`,
+  minus the `.pub` suffix. With the shipped default that is
+  `C:\Users\<you>\.ssh\id_rsa`. Step 1 below works it out for you.
 * **Your current public IP inside `AllowedClientCidrs`.** If your ISP changed it,
   update the config and re-run `Deploy-LeostreamPoC.ps1` to refresh the NSG.
 
-### Step 1 — get the Gateway's public IP
+### Step 1 — set up your variables
 
-`Deploy-LeostreamPoC.ps1` prints this when it finishes, but do not hard-code it
-or retype it. Fetch it from Azure, from the repository root:
+Do not hard-code or retype the Gateway address or the key path. Derive both from
+the config and from Azure, so they cannot drift apart. Run this from the
+repository root:
 
 ```powershell
 cd C:\path\to\leostream-azure-poc
-$rg = (Import-PowerShellDataFile ./config/poc.config.psd1).Azure.ResourceGroupName
-$gw = (Get-AzPublicIpAddress -ResourceGroupName $rg -Name pip-leo-gateway-01).IpAddress
-$gw     # ALWAYS check this before using it - it must print an IP address
+
+$cfg  = Import-PowerShellDataFile ./config/poc.config.psd1
+$rg   = $cfg.Azure.ResourceGroupName
+$user = $cfg.Admin.LinuxUsername
+
+# private key = the configured public key, minus the .pub suffix
+$key = ($cfg.Admin.SshPublicKeyPath -replace '^~', $HOME -replace '\.pub$','')
+$gw  = (Get-AzPublicIpAddress -ResourceGroupName $rg `
+          -Name $cfg.VirtualMachines.Gateway.PublicIpName).IpAddress
+
+# ALWAYS check these before using them
+$gw                       # must print an IP address
+Test-Path $key            # must print True
 ```
 
-If `$gw` comes back blank, stop. An unset variable in PowerShell expands to an
-empty string instead of raising an error, which produces confusing failures two
-commands later, such as `Invalid -J argument`. A blank value means the public IP
-does not exist yet, or you are in the wrong subscription.
+Both checks matter:
 
-PowerShell variables are **per window**. Open a new terminal and `$gw` is empty
-again, so re-run the three lines above each time.
+* **`$gw` blank** — the public IP does not exist yet, or you are signed in to the
+  wrong subscription. Stop and fix it. An unset variable in PowerShell expands to
+  an empty string rather than raising an error, which surfaces later as a
+  baffling `Invalid -J argument`.
+* **`Test-Path $key` is False** — you are about to pass `ssh -i` a file that does
+  not exist, and you will get `Identity file ... not accessible`. The usual cause
+  is generating a key under one name while `Admin.SshPublicKeyPath` still points
+  at another. The config default is `~/.ssh/id_rsa.pub`, so unless you changed
+  it, the private key is `~/.ssh/id_rsa` — **not** `leostream_poc`.
+
+PowerShell variables are **per window**. Open a new terminal and they are all
+empty again, so re-run this block each time.
 
 ### Step 2 — open a shell on the Gateway
 
 ```powershell
-ssh -i $HOME\.ssh\leostream_poc leoadmin@$gw
+ssh -i $key $user@$gw
 ```
 
 Expect a host-key prompt on first connection; type `yes`. You should land at
 `[leoadmin@leo-gateway-01 ~]$` with no password prompt. Type `exit` to return.
+
+If you are using your default key (`~/.ssh/id_rsa`), `-i $key` is optional —
+OpenSSH tries that key automatically. It is kept in these examples so they work
+whichever key you configured.
 
 Get this working before trying anything below — the other two commands both
 depend on it.
@@ -300,7 +340,7 @@ The Broker has no public IP, so SSH hops through the Gateway in a single command
 using `-J` (ProxyJump). Still run this **on your PC**, not on the Gateway:
 
 ```powershell
-ssh -i $HOME\.ssh\leostream_poc -J leoadmin@$gw leoadmin@10.50.1.10
+ssh -i $key -J $user@$gw $user@10.50.1.10
 ```
 
 You should land at `[leoadmin@leo-broker-01 ~]$`. Your key is used twice, for
@@ -312,7 +352,7 @@ The Broker's console is on port 443 of a private address, so forward a local por
 through the Gateway with `-L`:
 
 ```powershell
-ssh -i $HOME\.ssh\leostream_poc -L 8443:10.50.1.10:443 leoadmin@$gw
+ssh -i $key -L 8443:10.50.1.10:443 $user@$gw
 ```
 
 **Leave that window open** — closing it closes the tunnel. In a browser on the
@@ -332,12 +372,13 @@ already taken.
 | Symptom | Cause | Fix |
 |---|---|---|
 | `Invalid -J argument` | `$gw` is empty | Re-run step 1 and confirm `$gw` prints an IP |
+| `Identity file ... not accessible: No such file or directory` | The key named in `-i` does not exist. Usually you generated `leostream_poc` but left `Admin.SshPublicKeyPath` at the default `~/.ssh/id_rsa.pub`, or the reverse | `Get-ChildItem $HOME\.ssh` to see what you actually have, then make the config and the `-i` path agree. Step 1 derives `$key` correctly |
 | Connection hangs, then times out | Your IP is not in `AllowedClientCidrs` | Check with `(Invoke-RestMethod https://api.ipify.org?format=json).ip`, add it to the config, re-run `Deploy-LeostreamPoC.ps1` |
-| `Permission denied (publickey)` | Wrong key path or wrong username | Confirm the file after `-i` exists, and that the user matches `Admin.LinuxUsername` |
-| `Identity file ... not accessible` with a mangled path | Running in bash, not PowerShell | `exit` back to PowerShell |
+| `Permission denied (publickey)` | You are offering a different key from the one deployed, or the wrong username | Compare them: `(Get-AzVM -ResourceGroupName $rg -Name leo-gateway-01).OSProfile.LinuxConfiguration.Ssh.PublicKeys[0].KeyData` against `Get-Content "$key.pub"` |
+| `Identity file ... not accessible` with a mangled path like `/home/leoadmin.sshleostream_poc` | Running in bash inside a VM, not PowerShell. Bash expanded `$HOME` to the Linux home and ate the `\` characters | `exit` back to PowerShell |
 | Step 2 works but step 3 hangs | Broker VM is stopped or still booting | `Get-AzVM -ResourceGroupName $rg -Name leo-broker-01 -Status` |
 | Browser shows `ERR_CONNECTION_REFUSED` on localhost:8443 | Tunnel window closed, or the Broker software is not installed yet | Reopen the tunnel; check `systemctl status leostream` on the Broker |
-| `WARNING: UNPROTECTED PRIVATE KEY FILE` | Key file permissions too open | `icacls $HOME\.ssh\leostream_poc /inheritance:r /grant:r "$($env:USERNAME):(R)"` |
+| `WARNING: UNPROTECTED PRIVATE KEY FILE` | Key file permissions too open | `icacls $key /inheritance:r /grant:r "$($env:USERNAME):(R)"` |
 
 ### Avoiding SSH entirely
 

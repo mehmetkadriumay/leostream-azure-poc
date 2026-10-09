@@ -12,7 +12,7 @@ running inside the VMs.
 | Az modules | `Install-Module Az -Scope CurrentUser` |
 | Azure rights | Contributor **and** User Access Administrator (or Owner) |
 | Quota | ~6 vCPUs of the `Dsv5` family in your region |
-| SSH key | `ssh-keygen -t ed25519 -C "leostream-poc" -f $HOME\.ssh\leostream_poc` |
+| SSH key | Either reuse `~/.ssh/id_rsa.pub`, which is the config default, or generate `ssh-keygen -t ed25519 -C "leostream-poc" -f $HOME\.ssh\leostream_poc` **and** point `Admin.SshPublicKeyPath` at it |
 | Leostream media | HTTPS download URLs for the Platform 26 and Gateway installers, plus an evaluation licence key |
 | Your egress IP | `(Invoke-RestMethod https://api.ipify.org?format=json).ip` |
 
@@ -24,12 +24,22 @@ Edit `config/poc.config.psd1`. Two values matter before the first deployment:
 AllowedClientCidrs = @('203.0.113.45/32')   # your egress IP, not 0.0.0.0/0
 Admin = @{
     LinuxUsername    = 'leoadmin'
-    SshPublicKeyPath = '~/.ssh/leostream_poc.pub'
+    SshPublicKeyPath = '~/.ssh/id_rsa.pub'   # or your dedicated PoC key
 }
 ```
 
 Leaving `AllowedClientCidrs` at `0.0.0.0/0` opens both HTTPS and SSH to the
 internet. The deployment script warns you, but does not stop.
+
+`SshPublicKeyPath` decides which key ends up on both VMs, and therefore which
+private key you must pass to `ssh -i` from then on. If you generated a dedicated
+key such as `~/.ssh/leostream_poc.pub`, change this value **before** deploying —
+changing it afterwards has no effect on VMs that already exist. Verify it now:
+
+```powershell
+$pub = (Import-PowerShellDataFile ./config/poc.config.psd1).Admin.SshPublicKeyPath
+Test-Path ($pub -replace '^~', $HOME)     # must print True
+```
 
 Change `Azure.Location` if `westeurope` is not where you want the PoC, and
 `Azure.ResourceGroupName` if your naming standards differ.
@@ -141,17 +151,24 @@ private key only exists on your PC. If you see an error mentioning a path like
 
 ```powershell
 cd C:\path\to\leostream-azure-poc
-$rg = (Import-PowerShellDataFile ./config/poc.config.psd1).Azure.ResourceGroupName
-$gw = (Get-AzPublicIpAddress -ResourceGroupName $rg -Name pip-leo-gateway-01).IpAddress
-$gw     # must print an IP address - if it is blank, stop and investigate
 
-ssh -i $HOME\.ssh\leostream_poc -L 8443:10.50.1.10:443 leoadmin@$gw
+$cfg  = Import-PowerShellDataFile ./config/poc.config.psd1
+$rg   = $cfg.Azure.ResourceGroupName
+$user = $cfg.Admin.LinuxUsername
+$key  = ($cfg.Admin.SshPublicKeyPath -replace '^~', $HOME -replace '\.pub$','')
+$gw   = (Get-AzPublicIpAddress -ResourceGroupName $rg `
+           -Name $cfg.VirtualMachines.Gateway.PublicIpName).IpAddress
+
+$gw                # must print an IP address
+Test-Path $key     # must print True
+
+ssh -i $key -L 8443:10.50.1.10:443 $user@$gw
 ```
 
-Check `$gw` every time. PowerShell expands an unset variable to an empty string
-rather than failing, which surfaces later as a confusing error such as
-`Invalid -J argument`. Variables are also per-window, so re-run those lines in
-each new terminal.
+Check both values every time. PowerShell expands an unset variable to an empty
+string rather than failing, which surfaces later as a confusing error such as
+`Invalid -J argument` or `Identity file ... not accessible`. Variables are also
+per-window, so re-run those lines in each new terminal.
 
 **Leave that SSH window open** — it *is* the tunnel. In a browser on the same PC,
 browse to `https://localhost:8443/` and accept the self-signed certificate

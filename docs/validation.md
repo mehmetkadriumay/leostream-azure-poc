@@ -52,12 +52,18 @@ inside either VM. See
 [Administrative access](../README.md#administrative-access) if anything fails.
 
 ```powershell
-$rg = (Import-PowerShellDataFile ./config/poc.config.psd1).Azure.ResourceGroupName
-$gw = (Get-AzPublicIpAddress -ResourceGroupName $rg -Name pip-leo-gateway-01).IpAddress
-$gw     # must print an IP address
+$cfg  = Import-PowerShellDataFile ./config/poc.config.psd1
+$rg   = $cfg.Azure.ResourceGroupName
+$user = $cfg.Admin.LinuxUsername
+$key  = ($cfg.Admin.SshPublicKeyPath -replace '^~', $HOME -replace '\.pub$','')
+$gw   = (Get-AzPublicIpAddress -ResourceGroupName $rg `
+           -Name $cfg.VirtualMachines.Gateway.PublicIpName).IpAddress
 
-ssh -i $HOME\.ssh\leostream_poc leoadmin@$gw                            # Gateway
-ssh -i $HOME\.ssh\leostream_poc -J leoadmin@$gw leoadmin@10.50.1.10     # Broker
+$gw                # must print an IP address
+Test-Path $key     # must print True
+
+ssh -i $key $user@$gw                            # Gateway
+ssh -i $key -J $user@$gw $user@10.50.1.10        # Broker
 ```
 
 Both should land you at a shell prompt without a password — `[leoadmin@leo-gateway-01 ~]$`
@@ -66,7 +72,7 @@ and `[leoadmin@leo-broker-01 ~]$` respectively. `exit` returns to PowerShell.
 ### 2. Broker UI is reachable and only through the tunnel
 
 ```powershell
-ssh -i $HOME\.ssh\leostream_poc -L 8443:10.50.1.10:443 leoadmin@$gw
+ssh -i $key -L 8443:10.50.1.10:443 $user@$gw
 # leave this window open, then browse to https://localhost:8443/
 ```
 
