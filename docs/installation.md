@@ -239,16 +239,60 @@ here. Pools, policies and assignments likewise require at least one desktop.
 See [validation.md](validation.md) for what each check means and for the manual
 tests the script cannot perform.
 
-## 8. Adding a desktop later (optional)
+## 8. Azure Center credentials (optional)
+
+An Azure Center lets the Broker see, create, start and stop Azure VMs. Skip this
+if you only want the control plane.
+
+```powershell
+./Configure-LeostreamAzureCenter.ps1
+```
+
+This creates an Entra ID application, its service principal and a client secret,
+then tries to grant the service principal `Contributor` on `rg-leostream-poc`.
+It prints the four values to type into *Setup > Centers > Add Center >
+Microsoft Azure*:
+
+```
+Subscription ID         : ...
+Tenant / Directory ID   : ...
+Application (client) ID : ...
+Client secret           : ...
+```
+
+**Copy the secret immediately.** Azure reveals it once, and the script
+deliberately does not write it to disk. If you lose it, run
+`./Configure-LeostreamAzureCenter.ps1 -RotateSecret` for a replacement.
+
+### If you are only a Contributor
+
+Creating the application and the secret needs no Azure RBAC — those are
+Microsoft Entra operations. Only the role assignment needs **Owner** or **User
+Access Administrator**. When that step fails the script keeps everything it has
+already created and prints the command to delegate:
+
+```powershell
+New-AzRoleAssignment -ObjectId <sp-object-id> -RoleDefinitionName 'Contributor' `
+    -Scope '/subscriptions/<sub-id>/resourceGroups/rg-leostream-poc'
+```
+
+Use `-SkipRoleAssignment` to collect that command without attempting the call.
+Until it is run, the Center authenticates but lists no virtual machines.
+
+If your tenant blocks self-service app registration, have an administrator
+create a bare application (no API permissions, no redirect URI) and run
+`./Configure-LeostreamAzureCenter.ps1 -ApplicationId <client-id>`.
+
+Re-running the script is safe: it reuses an existing application, service
+principal and role assignment instead of creating duplicates.
+
+## 9. Adding a desktop later (optional)
 
 This PoC deploys none. To exercise the full brokering path:
 
 1. Create a Windows 11 VM in `snet-leostream` with no public IP.
 2. Install the Leostream Agent on it, pointing at the Broker on `10.50.1.10`.
-3. Ask a subscription **Owner** or **User Access Administrator** to grant the
-   Broker's managed identity **Virtual Machine Contributor** on
-   `rg-leostream-poc`, then add an Azure center under *Setup > Centers* using
-   **Managed identity** authentication.
+3. Add the Azure Center from step 8 under *Setup > Centers*.
 4. In the Broker UI, create a pool containing the VM, a policy that offers it,
    and an assignment that maps your user to that policy.
 5. Connect to the Gateway's public address and sign in as that user.
@@ -264,7 +308,9 @@ Bear in mind the VM will be in the same subnet as the Broker and Gateway, and
 | `SSH public key not found` | Wrong `SshPublicKeyPath` | Generate the key or fix the path |
 | `SkuNotAvailable` | VM size not offered in the region | Change `Size` or `Location` |
 | `OperationNotAllowed ... quota` | Not enough vCPU quota | Request an increase or use smaller sizes |
-| `Forbidden` / `AuthorizationFailed` creating a role assignment | You are granting the Broker identity a role, which needs User Access Administrator or Owner. Many subscriptions also apply an ABAC condition restricting *which* roles you may assign | Not needed for this PoC — no role assignment is required. Only relevant when adding desktops; ask a subscription Owner |
+| `Forbidden` / `AuthorizationFailed` creating a role assignment | Granting a role needs User Access Administrator or Owner. Many subscriptions also apply an ABAC condition restricting *which* roles you may assign | Not needed for the base deployment. For an Azure Center, the application and secret are still created — forward the printed `New-AzRoleAssignment` command to a subscription Owner |
+| `Authorization_RequestDenied` creating the application | The tenant has disabled self-service app registration | Have an administrator create a bare app registration, then `./Configure-LeostreamAzureCenter.ps1 -ApplicationId <client-id>` |
+| `PrincipalNotFound` on the role assignment | Entra has not yet replicated the new service principal | The script retries six times over a minute; re-run it if it still fails |
 | RunCommand times out | Guest agent not ready yet | Wait a few minutes after VM creation, then retry |
 | Installer download fails in the VM | The pinned version was withdrawn, or a custom URL expired | Verify with `Invoke-WebRequest -Method Head <uri>`, then pass a current one via `-InstallerUri` |
 | `No match for argument: ./leostream-...` | dnf only treats a local file as a package when the name ends in `.rpm` | The scripts preserve the upstream file name, so this only appears with a URL that has no file component |

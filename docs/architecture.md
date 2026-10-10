@@ -117,14 +117,40 @@ PoC deploys no desktops — so the permission would grant power over the
 subscription that nothing uses. Creating the identity but not assigning a role
 keeps the groundwork in place at zero privilege.
 
-If desktops are added later, someone holding **User Access Administrator** or
-**Owner** grants the identity **Virtual Machine Contributor** on the resource
-group. Note that this cannot be self-served from a Contributor account, and many
-subscriptions apply an ABAC condition that further restricts which roles a
-delegated administrator may assign.
+No service principal is created by the base deployment and no secret is stored
+anywhere — in this repository, in the VM, or in the Broker configuration.
 
-No service principal is created and no secret is stored anywhere — in this
-repository, in the VM, or in the Broker configuration.
+### Giving the Broker real Azure rights
+
+Once desktops exist, the Broker needs an **Azure Center** and therefore a
+credential with rights over the resource group. There are two routes, and they
+fail in very different places:
+
+| Route | Directory work | Azure RBAC work | Fails where |
+|---|---|---|---|
+| Managed identity | none | role assignment on the VM identity | The *only* step, so a Contributor is blocked outright |
+| Entra ID application | create app, service principal, secret | role assignment on the service principal | The last step, after the reusable artefacts already exist |
+
+`Configure-LeostreamAzureCenter.ps1` implements the second route for exactly
+that reason. Creating an application registration is a Microsoft Entra
+operation governed by directory settings, not by Azure RBAC, so it generally
+succeeds for an ordinary user. The script then attempts the role assignment and,
+if that returns `AuthorizationFailed`, prints a single `New-AzRoleAssignment`
+command to forward to an Owner or User Access Administrator rather than
+unwinding the work already done.
+
+Trade-offs to be aware of:
+
+* An application secret is bearer material with an expiry. A managed identity
+  has neither, which is why it remains the better choice when the permission to
+  assign roles is available.
+* The secret is surfaced once on the console and never persisted by these
+  scripts. Rotation is `-RotateSecret`.
+* The application lives in the tenant, not the resource group, so teardown
+  needs `Remove-LeostreamPoC.ps1 -RemoveAzureCenterApp`.
+* `Contributor` on the resource group is the default because it is what
+  Leostream documents; a custom role limited to read/start/stop/create/delete on
+  `Microsoft.Compute/virtualMachines` is tighter and works for most features.
 
 ## Deliberate omissions
 
@@ -133,7 +159,7 @@ repository, in the VM, or in the Broker configuration.
 | Azure Bastion | Roughly doubles the cost of the PoC and takes 10–20 minutes to provision | Administration is over SSH to the Gateway's public IP |
 | Separate subnets per tier | Two VMs do not need network segmentation to prove the concept | Gateway and Broker are not isolated from each other |
 | Desktop VMs | The largest cost item, and not needed to prove the control plane | Pools, policies and end-to-end sessions are not exercised |
-| A role assignment for the Broker identity | Nothing to manage without desktops, and granting roles needs User Access Administrator, which a Contributor cannot self-serve | No Azure center; the identity exists at zero privilege |
+| A role assignment for the Broker identity | Nothing to manage without desktops, and granting roles needs User Access Administrator, which a Contributor cannot self-serve | No Azure center by default; the identity exists at zero privilege. `Configure-LeostreamAzureCenter.ps1` adds one on demand |
 | Explicit deny rules | Azure already denies inbound by default at 65500 | None — the effective behaviour is identical |
 | Trusted Launch / vTPM | Extra configuration surface for no PoC benefit | VMs use the standard security type |
 

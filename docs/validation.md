@@ -24,6 +24,10 @@ fails.
 | Security | `leo-broker-01` is private only | No public IP on its NIC |
 | Security | `leo-gateway-01` has the expected public IP | Exactly one, as designed |
 | Identity | Broker managed identity | System-assigned identity with a principal ID |
+| AzureCenter | Entra application | The Azure Center application registration exists |
+| AzureCenter | Service principal | The application has a principal in this tenant |
+| AzureCenter | Client secret valid | At least one credential has not expired |
+| AzureCenter | Role assigned | The service principal holds its role, so the Center can see VMs |
 | Network | Gateway public IP assigned | The static IP is allocated |
 | Service | Gateway TCP/443 reachable | Your machine can open 443 |
 | Service | Gateway TCP/22 reachable | Your machine can open 22 |
@@ -38,6 +42,14 @@ fails.
   `systemctl status leostream`.
 * **Skip on the in-VNet check** — RunCommand could not run, usually because the
   guest agent is still starting. Wait and retry.
+* **Skip on the Azure Center application** — expected. The Center is optional;
+  run `Configure-LeostreamAzureCenter.ps1` if you want one.
+* **Warn on the Azure Center role assignment** — the credentials exist but the
+  service principal has no role, so the Center will sign in and then list no
+  virtual machines. An Owner or User Access Administrator must run the
+  `New-AzRoleAssignment` command the configure script printed.
+* **Fail on the client secret** — every credential has expired. Re-run
+  `Configure-LeostreamAzureCenter.ps1 -RotateSecret` and update the Center.
 
 ## Manual checks
 
@@ -144,12 +156,16 @@ one yourself:
 * an end-to-end user session from a client, through the Gateway, to a desktop
 * Leostream Agent registration and check-in
 * pools, policies and assignment logic
-* the Broker starting or stopping a desktop VM through its managed identity
-* the Azure center discovering VMs
+* the Broker starting or stopping a desktop VM
+* the Azure Center discovering VMs
 
-The last two are not covered at all. The managed identity exists and is
-verified, but it holds no role assignment and no Azure center is configured,
+The last two are not covered by the base deployment. The managed identity exists
+and is verified but holds no role assignment, and no Center is configured,
 because this PoC deploys no desktops for either to act on.
+`Configure-LeostreamAzureCenter.ps1` creates working Center credentials, and
+`Test-LeostreamPoC.ps1` then verifies the application, the secret and the role
+assignment — but whether the Center actually enumerates VMs is still something
+you confirm in the Broker UI.
 
 ## Record your results
 

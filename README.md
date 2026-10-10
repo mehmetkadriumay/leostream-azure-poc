@@ -20,6 +20,7 @@ Connection Broker and a separate internet-facing Leostream Gateway. Nothing else
 - [Deployment](#deployment)
 - [Administrative access](#administrative-access)
 - [Leostream configuration](#leostream-configuration)
+- [Azure Center credentials](#azure-center-credentials)
 - [Validation](#validation)
 - [Troubleshooting](#troubleshooting)
 - [Teardown](#teardown)
@@ -63,10 +64,11 @@ validation scripts both enforce this.
 
 **No desktops are deployed.** This PoC covers the Leostream control plane only.
 That means the end-to-end user session, Agent registration, pools, policies and
-the Broker starting/stopping a desktop VM are not exercised out of the box. The
-Broker's managed identity *is* deployed and verified, but it is intentionally
-left with no role assignment, since there is nothing for it to manage. To go
-further, see [Adding an Azure Center later](#adding-an-azure-center-later).
+the Broker starting/stopping a desktop VM are not exercised out of the box.
+
+To let the Broker create and power-manage desktop VMs, add an **Azure Center**.
+`Configure-LeostreamAzureCenter.ps1` prepares the credentials for you — see
+[Azure Center credentials](#azure-center-credentials).
 
 **No Azure Bastion.** You administer over SSH to the Gateway's public IP and hop
 to the Broker from there. See [Administrative access](#administrative-access).
@@ -92,6 +94,7 @@ leostream-azure-poc/
     ├── Deploy-LeostreamPoC.ps1          # RG, VNet, 1 subnet, 1 NSG, 2 VMs
     ├── Install-LeostreamBroker.ps1      # Platform 26 on leo-broker-01
     ├── Install-LeostreamGateway.ps1     # Gateway on leo-gateway-01
+    ├── Configure-LeostreamAzureCenter.ps1  # Entra app + secret + role for a Center
     ├── Test-LeostreamPoC.ps1            # validation
     └── Remove-LeostreamPoC.ps1          # teardown
 ```
@@ -104,7 +107,7 @@ leostream-azure-poc/
 |---|---|
 | PowerShell | Windows PowerShell **5.1** or PowerShell **7.4+** (7.x recommended) |
 | Az modules | `Az.Accounts`, `Az.Resources`, `Az.Network`, `Az.Compute` (11.0+) |
-| Azure permissions | **Contributor** on the subscription or resource group. User Access Administrator is *not* needed — no role assignments are created |
+| Azure permissions | **Contributor** on the subscription or resource group is enough to deploy. Only the optional Azure Center *role assignment* needs Owner or User Access Administrator, and that step degrades gracefully — see [Azure Center credentials](#azure-center-credentials) |
 | Azure quota | ~6 vCPUs of the `Dsv5` family in the target region |
 | SSH key pair | For the two RHEL 9 VMs |
 | Leostream | An evaluation licence. The installer packages download automatically from the public URLs in `poc.config.psd1` |
@@ -159,6 +162,9 @@ cd scripts
 
 # 5. Validate
 ./Test-LeostreamPoC.ps1
+
+# 6. Optional - credentials for a Leostream Azure Center (pools and desktops)
+./Configure-LeostreamAzureCenter.ps1
 ```
 
 ---
@@ -179,6 +185,9 @@ Everything is centralised in [`config/poc.config.psd1`](config/poc.config.psd1).
 | `Admin.SshPublicKeyPath` | `~/.ssh/id_rsa.pub` | Your key lives elsewhere |
 | `Leostream.BrokerInstallerUri` | Platform `26.1.6-1` | Testing a different Broker build |
 | `Leostream.GatewayInstallerUri` | Gateway `2026.1.1-2` | Testing a different Gateway build |
+| `AzureCenter.AppDisplayName` | `leostream-poc-azure-center` | Naming standards differ |
+| `AzureCenter.RoleName` | `Contributor` | A narrower custom role is required |
+| `AzureCenter.SecretValidMonths` | `12` | Secret lifetime policy differs |
 
 The deployment script prints a warning if `AllowedClientCidrs` still contains
 `0.0.0.0/0`. That default leaves SSH open to the internet — change it.
@@ -190,8 +199,9 @@ The deployment script prints a warning if `AllowedClientCidrs` still contains
   entered in the Broker UI
 * Leostream RPMs — never committed; downloaded at run time from the public
   URLs in `poc.config.psd1`, which are version pointers, not credentials
-* Azure credentials and service-principal secrets — the Broker uses a
-  system-assigned managed identity
+* Azure credentials and service-principal secrets — the Broker ships with a
+  system-assigned managed identity, and the optional Azure Center secret created
+  by `Configure-LeostreamAzureCenter.ps1` is printed once and never persisted
 
 ---
 
@@ -513,22 +523,91 @@ Open the Broker UI through the SSH tunnel above, then:
 
 Steps 1–4 are all this PoC exercises.
 
-### Adding an Azure Center later
+---
 
-This PoC does **not** configure *Setup > Centers*, because a Center exists to
-discover and power-manage desktop VMs and there are none here. The Broker is
-still deployed with a system-assigned managed identity, so the groundwork is
-done. To add desktops later:
+## Azure Center credentials
 
-1. Add a Windows VM to `snet-leostream` and install the Leostream Agent on it,
-   pointing at `10.50.1.10`.
-2. Have someone with **User Access Administrator** or **Owner** grant the
-   Broker's managed identity **Virtual Machine Contributor** on
-   `rg-leostream-poc`. Ordinary Contributor rights cannot grant roles, and many
-   subscriptions further restrict which roles you may assign.
-3. In the Broker UI, *Setup > Centers > Add Center > Azure*, authentication
-   **Managed identity**, then continue with *Configuration > Pools*, *Policies*
-   and *Assignments*.
+A Leostream **Center** (*Setup > Centers*) is what lets the Broker see, create,
+start and stop Azure VMs. The base PoC deploys no desktops, so it configures no
+Center — but the moment you want pools and real desktops, you need one.
+
+Leostream accepts two authentication models, and the difference is entirely
+about *who has to approve what*:
+
+| Model | What it needs | Who can do it |
+|---|---|---|
+| Managed identity | A role assignment on the Broker VM's identity | **Owner** or **User Access Administrator** only |
+| Entra ID application | Tenant ID, application (client) ID, client secret — plus one role assignment for the service principal | Any user can create the app and secret; only the role assignment is elevated |
+
+The managed-identity route looks cleaner but fails early and hard on most
+corporate subscriptions: a Contributor cannot create role assignments, so the
+whole thing stops with `AuthorizationFailed` and no partial progress.
+
+The application route splits that wall in two. Creating an app registration, its
+service principal and a client secret is a **Microsoft Entra** operation and
+needs no Azure RBAC at all — it works for an ordinary user in a default tenant.
+Only the last step, granting the service principal a role, needs elevated
+rights, and that is a single command you can hand to an administrator.
+
+```powershell
+./Configure-LeostreamAzureCenter.ps1
+```
+
+The script, idempotently:
+
+1. Creates (or reuses) the Entra application `leostream-poc-azure-center`.
+2. Creates (or reuses) its service principal.
+3. Issues a client secret valid for `AzureCenter.SecretValidMonths` months.
+4. Assigns `AzureCenter.RoleName` (`Contributor`) on `rg-leostream-poc`,
+   retrying while Entra replicates the new principal.
+5. Prints the four values the Azure Center dialog asks for.
+
+**If step 4 fails with `AuthorizationFailed`, nothing is lost.** The app, the
+service principal and the secret are already created; the script prints the
+exact command for an administrator and carries on:
+
+```powershell
+New-AzRoleAssignment -ObjectId <sp-object-id> -RoleDefinitionName 'Contributor' `
+    -Scope '/subscriptions/<sub-id>/resourceGroups/rg-leostream-poc'
+```
+
+You can also skip the attempt entirely and collect the command up front:
+
+```powershell
+./Configure-LeostreamAzureCenter.ps1 -SkipRoleAssignment
+```
+
+If your tenant blocks self-service app registration (`Authorization_RequestDenied`),
+ask an administrator to create a bare app registration — no API permissions, no
+redirect URI — and point the script at it:
+
+```powershell
+./Configure-LeostreamAzureCenter.ps1 -ApplicationId <client-id>
+```
+
+Other options:
+
+| Option | Effect |
+|---|---|
+| `-RotateSecret` | Issue a fresh secret on an existing application. The only way back if you lose the printed one |
+| `-Scope Subscription` | Grant the role subscription-wide instead of on the resource group |
+| `-RoleDefinitionName` | Use a narrower role than `Contributor` |
+| `-SecretValidMonths` | Secret lifetime, 1–24 months |
+| `-WhatIf` | Preview without touching the directory |
+
+> **The client secret is printed once and never written to disk.** It is not
+> stored in `poc.config.psd1`, not logged, and cannot be read back from Azure.
+> Put it straight into the Broker UI or Key Vault; if you lose it, re-run with
+> `-RotateSecret`.
+
+Then, in the Broker UI: *Setup > Centers > Add Center > Microsoft Azure*, and
+enter subscription ID, tenant ID, application ID and the secret. Continue with
+*Configuration > Pools*, *Policies* and *Assignments*. For desktops, add a
+Windows VM to `snet-leostream` and install the Leostream Agent pointing at
+`10.50.1.10`.
+
+The Broker's system-assigned managed identity is still deployed and verified, so
+you can switch to the managed-identity model later if someone grants it a role.
 
 ---
 
@@ -544,6 +623,12 @@ inbound rules, that Broker and Gateway are separate VMs, that both are running,
 that only the Gateway is internet-facing, that the Broker has a managed
 identity, and that the Gateway responds on 443 and 22 while the Broker responds
 on 443 from inside the VNet. Exits `1` on any failure.
+
+If `Configure-LeostreamAzureCenter.ps1` has been run, it also reports the Entra
+application, its service principal, whether a client secret is still valid and
+whether the role assignment landed. A missing application is reported as `Skip`
+(the Center is optional) and a missing role assignment as `Warn` — that is the
+state where the Center authenticates but sees no VMs.
 
 Manual end-to-end and negative tests: [docs/validation.md](docs/validation.md).
 
@@ -566,7 +651,12 @@ Manual end-to-end and negative tests: [docs/validation.md](docs/validation.md).
 | Cannot SSH to the Broker directly | Working as designed — it has no public IP | Use `ssh -J` through the Gateway |
 | Certificate warning on the Gateway | Self-signed certificate | Install a trusted certificate before any real use |
 | No desktops offered to any user | Working as designed — this PoC deploys none | Add a VM to the subnet and install the Leostream Agent |
-| Broker cannot see Azure VMs | Working as designed — no Azure Center is configured and no desktops exist | See *Adding an Azure Center later* above |
+| Broker cannot see Azure VMs | No Azure Center is configured, or its service principal has no role assignment | Run `./Configure-LeostreamAzureCenter.ps1`, then check the `AzureCenter` rows in `./Test-LeostreamPoC.ps1` |
+| `AuthorizationFailed` creating the role assignment | Contributor cannot grant access; that needs Owner or User Access Administrator | The app and secret were still created. Send the printed `New-AzRoleAssignment` command to an administrator |
+| `Authorization_RequestDenied` creating the application | The tenant blocks self-service app registration | Have an administrator create a bare app registration, then `./Configure-LeostreamAzureCenter.ps1 -ApplicationId <client-id>` |
+| `PrincipalNotFound` on the role assignment | Entra has not replicated the brand-new service principal | The script already retries six times over a minute; just re-run it |
+| Azure Center stops working after some months | The client secret expired | `./Configure-LeostreamAzureCenter.ps1 -RotateSecret`, then update the Center |
+| Lost the printed client secret | Azure shows a secret only once, by design | `./Configure-LeostreamAzureCenter.ps1 -RotateSecret` |
 
 Useful diagnostics:
 
@@ -590,15 +680,22 @@ Get-AzEffectiveNetworkSecurityGroup -ResourceGroupName $rg -NetworkInterfaceName
 ## Teardown
 
 ```powershell
-./Remove-LeostreamPoC.ps1                      # delete everything, with confirmation
-./Remove-LeostreamPoC.ps1 -KeepResourceGroup   # delete resources, keep the RG
-./Remove-LeostreamPoC.ps1 -Force               # no prompt (use carefully)
+./Remove-LeostreamPoC.ps1                           # delete everything, with confirmation
+./Remove-LeostreamPoC.ps1 -KeepResourceGroup        # delete resources, keep the RG
+./Remove-LeostreamPoC.ps1 -RemoveAzureCenterApp     # also delete the Entra application
+./Remove-LeostreamPoC.ps1 -Force                    # no prompt (use carefully)
 ```
 
 The script refuses to touch a resource group that is not tagged
 `project=leostream-poc` unless `-Force` is given. It also clears any role
 assignments held by the Broker's managed identity, so that nothing is left
 orphaned if you granted it one while adding desktops.
+
+The Azure Center application is a **directory** object, not an Azure resource,
+so deleting the resource group does not remove it. `-RemoveAzureCenterApp`
+strips its role assignments and deletes the application, which takes the service
+principal and the secret with it. Without that switch the application is left in
+place deliberately — and reported as such — so a redeploy can reuse it.
 
 Release your Leostream licence seats afterwards.
 
@@ -650,6 +747,11 @@ resembling production use:
 * Store any operational secrets in Azure Key Vault.
 * Review the role granted to the Broker identity and reduce it to the minimum
   your Leostream features actually require.
+* For the Azure Center, prefer a short secret lifetime and a custom role over
+  `Contributor` scoped to the resource group — Leostream only needs to read,
+  create, start, stop and delete VMs there. Rotate with `-RotateSecret` on a
+  schedule, and delete the application with
+  `Remove-LeostreamPoC.ps1 -RemoveAzureCenterApp` when the PoC ends.
 
 ---
 

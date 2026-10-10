@@ -208,6 +208,60 @@ if ($brokerVm) {
     }
 }
 
+# --- Azure Center credentials -------------------------------------------------
+# Optional: only meaningful once Configure-LeostreamAzureCenter.ps1 has run, so
+# a missing application is a Skip rather than a failure.
+$centerAppName = $null
+if ($config.ContainsKey('AzureCenter') -and $config.AzureCenter.AppDisplayName) {
+    $centerAppName = $config.AzureCenter.AppDisplayName
+}
+
+if ($centerAppName) {
+    $centerApp = Get-AzADApplication -DisplayName $centerAppName -ErrorAction SilentlyContinue | Select-Object -First 1
+    if (-not $centerApp) {
+        Add-Result -Area 'AzureCenter' -Check "Entra application '$centerAppName'" -Status Skip `
+            -Detail 'not created - run ./Configure-LeostreamAzureCenter.ps1 if you want an Azure Center'
+    }
+    else {
+        Add-Result -Area 'AzureCenter' -Check "Entra application '$centerAppName'" -Status Pass -Detail $centerApp.AppId
+
+        $centerSp = Get-AzADServicePrincipal -ApplicationId $centerApp.AppId -ErrorAction SilentlyContinue
+        if ($centerSp) {
+            Add-Result -Area 'AzureCenter' -Check 'Service principal' -Status Pass -Detail $centerSp.Id
+
+            $creds = @(Get-AzADAppCredential -ApplicationId $centerApp.AppId -ErrorAction SilentlyContinue)
+            $live  = @($creds | Where-Object { $_.EndDateTime -and $_.EndDateTime -gt (Get-Date) })
+            if ($live.Count -gt 0) {
+                $soonest = ($live | Sort-Object EndDateTime | Select-Object -First 1).EndDateTime
+                Add-Result -Area 'AzureCenter' -Check 'Client secret valid' -Status Pass -Detail "earliest expiry $($soonest.ToString('yyyy-MM-dd'))"
+            }
+            elseif ($creds.Count -gt 0) {
+                Add-Result -Area 'AzureCenter' -Check 'Client secret valid' -Status Fail -Detail 'all credentials have expired - re-run Configure-LeostreamAzureCenter.ps1 -RotateSecret'
+            }
+            else {
+                Add-Result -Area 'AzureCenter' -Check 'Client secret valid' -Status Warn -Detail 'no credential on the application'
+            }
+
+            $centerRole = 'Contributor'
+            if ($config.AzureCenter.ContainsKey('RoleName') -and $config.AzureCenter.RoleName) {
+                $centerRole = $config.AzureCenter.RoleName
+            }
+            $assignments = @(Get-AzRoleAssignment -ObjectId $centerSp.Id -ErrorAction SilentlyContinue |
+                Where-Object { $_.RoleDefinitionName -eq $centerRole })
+            if ($assignments.Count -gt 0) {
+                Add-Result -Area 'AzureCenter' -Check "'$centerRole' role assigned" -Status Pass -Detail $assignments[0].Scope
+            }
+            else {
+                Add-Result -Area 'AzureCenter' -Check "'$centerRole' role assigned" -Status Warn `
+                    -Detail 'the Center will authenticate but see no VMs - an Owner or User Access Administrator must grant the role'
+            }
+        }
+        else {
+            Add-Result -Area 'AzureCenter' -Check 'Service principal' -Status Fail -Detail 'application exists but has no service principal in this tenant'
+        }
+    }
+}
+
 # --- gateway reachability -----------------------------------------------------
 $pip = Get-AzPublicIpAddress -ResourceGroupName $rgName -Name $gatewaySpec.PublicIpName -ErrorAction SilentlyContinue
 if ($pip -and $pip.IpAddress -and $pip.IpAddress -ne 'Not Assigned') {

@@ -32,6 +32,25 @@
         GatewayInstallerUri = 'https://downloads.leostream.com/leostream-gateway-2026.1.1-2.x86_64.rpm'
     }
 
+    # Credentials for a Leostream Azure Center (Setup > Centers). Leostream
+    # accepts either the Broker's managed identity or an Entra ID application.
+    # The application model is the default here because creating one needs no
+    # Azure RBAC at all - only the final role assignment does, and that can be
+    # handed to an administrator as a single command.
+    #
+    # Configure-LeostreamAzureCenter.ps1 creates the application, the service
+    # principal and the secret. No secret is ever stored in this file.
+    AzureCenter = @{
+        AppDisplayName    = 'leostream-poc-azure-center'
+
+        # Contributor is what Leostream needs to create, power-manage and
+        # delete desktop VMs. Narrow it to a custom role for production.
+        RoleName          = 'Contributor'
+
+        # Client secret lifetime in months (1-24).
+        SecretValidMonths = 12
+    }
+
     Network = @{
         VNetName     = 'vnet-leostream-poc'
         AddressSpace = '10.50.0.0/16'
