@@ -6,27 +6,52 @@
     Removes the Leostream PoC from Azure.
 
 .DESCRIPTION
-    Deletes the whole PoC resource group (the default) or, with
-    -KeepResourceGroup, only the resources created by Deploy-LeostreamPoC.ps1.
+    Deletes the VMs, disks, NICs, public IPs, NAT gateway, VNet and NSG created
+    by Deploy-LeostreamPoC.ps1, and by default KEEPS the resource group itself.
 
-    Role assignments granted to the Broker's managed identity at subscription
-    scope are removed as well, because deleting the VM alone leaves orphaned
-    assignments behind.
+    Keeping the group is deliberate. The Azure Center's role assignment is
+    scoped to the resource group, and on most corporate subscriptions only an
+    Owner or User Access Administrator can create it - frequently someone other
+    than you. Deleting the group destroys that assignment, and recreating a
+    group with the same name does not bring it back: you would have to ask for
+    it again. Keeping an empty resource group costs nothing.
 
-    The Entra ID application created by Configure-LeostreamAzureCenter.ps1 lives
-    outside the resource group, so deleting the group does not touch it. Pass
-    -RemoveAzureCenterApp to delete it too.
+    So the usual cycle is:
+
+        ./Remove-LeostreamPoC.ps1      # tear down, keep RG + Entra app
+        ./Deploy-LeostreamPoC.ps1      # redeploy into the same RG
+
+    and the Azure Center keeps working with the same client secret, with no
+    second trip to an administrator.
+
+    Pass -RemoveResourceGroup only when you are finished with the PoC for good.
+
+    Role assignments held by the Broker's system-assigned managed identity are
+    always removed, because that identity is deleted along with its VM and the
+    assignments would otherwise be left orphaned. Nothing is lost that could
+    have been preserved.
+
+    The Entra ID application created by Configure-LeostreamAzureCenter.ps1 is a
+    directory object, not an Azure resource, so no form of this teardown touches
+    it unless you pass -RemoveAzureCenterApp.
 
     The script refuses to run against a resource group that is not tagged as
     part of this PoC unless -Force is supplied.
 
+.PARAMETER RemoveResourceGroup
+    Also delete the resource group itself. This destroys any role assignment
+    scoped to it, including the Azure Center's, which then has to be granted
+    again by an Owner or User Access Administrator.
+
 .PARAMETER KeepResourceGroup
-    Delete the VMs, disks, NICs, public IP, VNet and NSG but keep the
-    resource group itself.
+    Retained for compatibility. Keeping the resource group is now the default,
+    so this switch has no effect.
 
 .PARAMETER RemoveAzureCenterApp
     Also delete the Entra ID application registration (and with it the service
     principal, its secret and its role assignments) used by the Azure Center.
+    Only do this if you will not redeploy - it is the other half of what you
+    would need an administrator for.
 
 .PARAMETER Force
     Skip the confirmation prompt and the PoC tag safety check.
@@ -34,12 +59,19 @@
 .EXAMPLE
     ./Remove-LeostreamPoC.ps1
 
+    Deletes the running resources, keeps the resource group and the Entra
+    application so the next deployment needs no administrator.
+
 .EXAMPLE
-    ./Remove-LeostreamPoC.ps1 -KeepResourceGroup -Force
+    ./Remove-LeostreamPoC.ps1 -RemoveResourceGroup -RemoveAzureCenterApp -Force
+
+    Complete removal, including the role assignment you may have had to ask
+    someone else for.
 #>
 [CmdletBinding(SupportsShouldProcess = $true, ConfirmImpact = 'High')]
 param(
     [string] $ConfigPath = (Join-Path (Join-Path $PSScriptRoot '..') (Join-Path 'config' 'poc.config.psd1')),
+    [switch] $RemoveResourceGroup,
     [switch] $KeepResourceGroup,
     [switch] $RemoveAzureCenterApp,
     [switch] $Force
@@ -51,6 +83,15 @@ $ErrorActionPreference = 'Stop'
 # -Force is documented as "no prompt". The script is declared ConfirmImpact High,
 # so without this every ShouldProcess call would still stop and ask.
 if ($Force) { $ConfirmPreference = 'None' }
+
+if ($KeepResourceGroup) {
+    Write-Host 'Note: -KeepResourceGroup is now the default and is no longer needed.' -ForegroundColor DarkGray
+    # If both are given, the safe one wins rather than the destructive one.
+    if ($RemoveResourceGroup) {
+        Write-Warning '-KeepResourceGroup and -RemoveResourceGroup were both supplied. Keeping the resource group.'
+        $RemoveResourceGroup = $false
+    }
+}
 
 $config = Import-PowerShellDataFile -Path (Resolve-Path $ConfigPath).Path
 $rgName = $config.Azure.ResourceGroupName
@@ -134,8 +175,44 @@ $resources = @(Get-AzResource -ResourceGroupName $rgName)
 Write-Host "    $($resources.Count) resource(s) will be removed." -ForegroundColor DarkGray
 $resources | Select-Object Name, ResourceType | Format-Table -AutoSize | Out-String | Write-Host
 
+if ($RemoveResourceGroup) {
+    Write-Host '    The resource group itself will be deleted.' -ForegroundColor Yellow
+
+    # Role assignments scoped to the resource group die with it. The Broker's
+    # managed identity is expendable - it is deleted with its VM either way -
+    # but anything else here was granted to a principal that outlives the
+    # deployment, which on a locked-down subscription means another request to
+    # an Owner or User Access Administrator.
+    $brokerPrincipalId = $null
+    $brokerVmForScope = Get-AzVM -ResourceGroupName $rgName -Name $config.VirtualMachines.Broker.Name -ErrorAction SilentlyContinue
+    if ($brokerVmForScope -and $brokerVmForScope.Identity) { $brokerPrincipalId = $brokerVmForScope.Identity.PrincipalId }
+
+    $rgScope = "/subscriptions/$($context.Subscription.Id)/resourceGroups/$rgName"
+    $doomed = @(Get-AzRoleAssignment -Scope $rgScope -ErrorAction SilentlyContinue |
+        Where-Object { $_.Scope -eq $rgScope -and $_.ObjectId -ne $brokerPrincipalId })
+
+    if ($doomed.Count -gt 0) {
+        Write-Host ''
+        Write-Warning @"
+Deleting this resource group also deletes $($doomed.Count) role assignment(s) scoped to it:
+
+$(($doomed | ForEach-Object { "    $($_.RoleDefinitionName) -> $(if ($_.DisplayName) { $_.DisplayName } else { $_.ObjectId })" }) -join "`n")
+
+Recreating a resource group with the same name does NOT restore these. If you
+granted the Azure Center its role via an administrator, you will have to ask
+again before the Center can see any VMs.
+
+Press Ctrl+C now and re-run without -RemoveResourceGroup to keep them.
+"@
+        Write-Host ''
+    }
+}
+else {
+    Write-Host "    The resource group '$rgName' and any role assignments on it will be kept." -ForegroundColor DarkGray
+}
+
 if (-not $Force) {
-    $answer = Read-Host "Type the resource group name '$rgName' to confirm deletion"
+    $answer = Read-Host "Type the resource group name '$rgName' to confirm"
     if ($answer -ne $rgName) {
         Write-Host 'Confirmation did not match - aborting.' -ForegroundColor Yellow
         return
@@ -172,16 +249,21 @@ else {
 }
 
 # --- delete -------------------------------------------------------------------
-if ($KeepResourceGroup) {
+if (-not $RemoveResourceGroup) {
     Write-Host '==> Deleting individual resources (resource group retained)' -ForegroundColor Cyan
 
-    # Order matters: compute first, then NICs/public IPs, then VNet/NSG.
+    # Order matters, and every link has to be broken before its target can go:
+    # a NIC holds the VM's subnet and public IP, the subnet holds the NAT
+    # gateway and NSG, and the NAT gateway holds its own public IP. Deleting the
+    # VNet is what releases the NAT gateway, so it has to precede it - and both
+    # public IPs can only go once nothing references them.
     $order = @(
         'Microsoft.Compute/virtualMachines',
         'Microsoft.Compute/disks',
         'Microsoft.Network/networkInterfaces',
-        'Microsoft.Network/publicIPAddresses',
         'Microsoft.Network/virtualNetworks',
+        'Microsoft.Network/natGateways',
+        'Microsoft.Network/publicIPAddresses',
         'Microsoft.Network/networkSecurityGroups'
     )
 
@@ -194,15 +276,38 @@ if ($KeepResourceGroup) {
         }
     }
 
-    $remaining = Get-AzResource -ResourceGroupName $rgName
-    foreach ($resource in $remaining) {
-        if ($PSCmdlet.ShouldProcess($resource.Name, "Delete $($resource.ResourceType)")) {
-            Write-Host "    Deleting leftover $($resource.Name)" -ForegroundColor DarkGray
-            Remove-AzResource -ResourceId $resource.ResourceId -Force -ErrorAction Continue | Out-Null
+    # Under -WhatIf nothing was actually deleted, so a sweep would just rediscover
+    # every resource and report a failure that did not happen.
+    if ($WhatIfPreference) {
+        Write-Host '==> (-WhatIf) Resource group would be retained.' -ForegroundColor Green
+        return
+    }
+
+    # Anything not in the ordered list, plus anything whose dependency had not
+    # finished deleting on the first attempt. Two passes clear the usual
+    # "still in use by" races without needing explicit dependency tracking.
+    for ($pass = 1; $pass -le 2; $pass++) {
+        $remaining = @(Get-AzResource -ResourceGroupName $rgName -ErrorAction SilentlyContinue)
+        if ($remaining.Count -eq 0) { break }
+
+        foreach ($resource in $remaining) {
+            if ($PSCmdlet.ShouldProcess($resource.Name, "Delete $($resource.ResourceType)")) {
+                Write-Host "    Deleting leftover $($resource.Name) ($($resource.ResourceType))" -ForegroundColor DarkGray
+                Remove-AzResource -ResourceId $resource.ResourceId -Force -ErrorAction Continue | Out-Null
+            }
         }
     }
 
-    Write-Host '==> Resources removed; resource group retained.' -ForegroundColor Green
+    $stillThere = @(Get-AzResource -ResourceGroupName $rgName -ErrorAction SilentlyContinue)
+    if ($stillThere.Count -gt 0) {
+        Write-Warning "$($stillThere.Count) resource(s) could not be deleted:"
+        $stillThere | Select-Object Name, ResourceType | Format-Table -AutoSize | Out-String | Write-Host
+        Write-Host '    Re-run the script - a dependency may simply not have finished deleting yet.' -ForegroundColor Yellow
+    }
+    else {
+        Write-Host '==> Resources removed; resource group retained.' -ForegroundColor Green
+        Write-Host "    './Deploy-LeostreamPoC.ps1' will redeploy into '$rgName' and reuse any role assignment on it." -ForegroundColor DarkGray
+    }
 }
 else {
     if ($PSCmdlet.ShouldProcess($rgName, 'Delete resource group and all contained resources')) {

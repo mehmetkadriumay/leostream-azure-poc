@@ -474,6 +474,40 @@ $user      = $config.Admin.LinuxUsername
 $brokerIp  = $brokerSpec.PrivateIp
 $key       = $config.Admin.SshPublicKeyPath -replace '^~', $HOME -replace '\.pub$', ''
 
+# A redeployment into a retained resource group inherits the Azure Center's role
+# assignment, which is the one part of this PoC you may have needed someone else
+# to create. Say so explicitly, so it is obvious whether a second request to an
+# administrator is needed.
+$centerName = 'leostream-poc-azure-center'
+if ($config.ContainsKey('AzureCenter') -and $config.AzureCenter.AppDisplayName) {
+    $centerName = $config.AzureCenter.AppDisplayName
+}
+$centerApp = Get-AzADApplication -DisplayName $centerName -ErrorAction SilentlyContinue | Select-Object -First 1
+if ($centerApp) {
+    $centerSp = Get-AzADServicePrincipal -ApplicationId $centerApp.AppId -ErrorAction SilentlyContinue
+    $centerRole = 'Contributor'
+    if ($config.AzureCenter.ContainsKey('RoleName') -and $config.AzureCenter.RoleName) {
+        $centerRole = $config.AzureCenter.RoleName
+    }
+
+    Write-Host ''
+    Write-Host "Azure Center application '$centerName' already exists ($($centerApp.AppId))." -ForegroundColor Green
+
+    if ($centerSp) {
+        $held = @(Get-AzRoleAssignment -ObjectId $centerSp.Id -ErrorAction SilentlyContinue |
+            Where-Object { $_.RoleDefinitionName -eq $centerRole })
+        if ($held.Count -gt 0) {
+            Write-Host "  '$centerRole' is still assigned at $($held[0].Scope)." -ForegroundColor Green
+            Write-Host '  Nothing to re-request - reuse the existing client secret in the Center.' -ForegroundColor DarkGray
+        }
+        else {
+            Write-Host "  No '$centerRole' assignment found for its service principal." -ForegroundColor Yellow
+            Write-Host '  Run ./Configure-LeostreamAzureCenter.ps1 to assign it, or to print the' -ForegroundColor Yellow
+            Write-Host '  command for an administrator.' -ForegroundColor Yellow
+        }
+    }
+}
+
 Write-Host ''
 Write-Host 'Next steps:' -ForegroundColor Green
 Write-Host '  1. ./Install-LeostreamBroker.ps1        # install Leostream Platform 26 on leo-broker-01'

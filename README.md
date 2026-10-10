@@ -705,22 +705,47 @@ Get-AzEffectiveNetworkSecurityGroup -ResourceGroupName $rg -NetworkInterfaceName
 ## Teardown
 
 ```powershell
-./Remove-LeostreamPoC.ps1                           # delete everything, with confirmation
-./Remove-LeostreamPoC.ps1 -KeepResourceGroup        # delete resources, keep the RG
-./Remove-LeostreamPoC.ps1 -RemoveAzureCenterApp     # also delete the Entra application
-./Remove-LeostreamPoC.ps1 -Force                    # no prompt (use carefully)
+./Remove-LeostreamPoC.ps1                        # delete the resources, keep the RG (default)
+./Remove-LeostreamPoC.ps1 -RemoveResourceGroup   # also delete the resource group
+./Remove-LeostreamPoC.ps1 -RemoveAzureCenterApp  # also delete the Entra application
+./Remove-LeostreamPoC.ps1 -Force                 # no prompt (use carefully)
 ```
 
+**The resource group is kept by default, on purpose.** Everything billable — the
+VMs, disks, public IPs and the NAT gateway — is deleted, so an empty resource
+group costs nothing. What it preserves is the Azure Center's role assignment,
+which is scoped to the group and is the one step that usually needs an Owner or
+User Access Administrator. Delete the group and that assignment goes with it;
+recreating a group with the same name does **not** bring it back.
+
+So the repeatable cycle is:
+
+```powershell
+./Remove-LeostreamPoC.ps1     # tear down
+./Deploy-LeostreamPoC.ps1     # redeploy into the same resource group
+```
+
+`Deploy-LeostreamPoC.ps1` reuses an existing resource group rather than
+recreating it, and reports at the end whether the Azure Center application and
+its role assignment are still in place. If they are, reuse the same client
+secret in the Broker — there is nothing to re-request.
+
+Use `-RemoveResourceGroup` only when you are finished for good. Before deleting,
+the script lists any role assignments scoped to the group that are about to be
+destroyed, so you get a last chance to reconsider.
+
 The script refuses to touch a resource group that is not tagged
-`project=leostream-poc` unless `-Force` is given. It also clears any role
-assignments held by the Broker's managed identity, so that nothing is left
-orphaned if you granted it one while adding desktops.
+`project=leostream-poc` unless `-Force` is given.
+
+Role assignments held by the Broker's **managed identity** are always removed.
+That identity is deleted along with its VM, so the assignments would be left
+orphaned either way — nothing is lost that could have been kept.
 
 The Azure Center application is a **directory** object, not an Azure resource,
-so deleting the resource group does not remove it. `-RemoveAzureCenterApp`
-strips its role assignments and deletes the application, which takes the service
-principal and the secret with it. Without that switch the application is left in
-place deliberately — and reported as such — so a redeploy can reuse it.
+so no form of this teardown removes it unless you ask. `-RemoveAzureCenterApp`
+strips its role assignments and deletes the application, taking the service
+principal and the secret with it. That is the other half of what you would need
+an administrator for, so leave it alone if you intend to redeploy.
 
 Release your Leostream licence seats afterwards.
 

@@ -291,6 +291,27 @@ create a bare application (no API permissions, no redirect URI) and run
 Re-running the script is safe: it reuses an existing application, service
 principal and role assignment instead of creating duplicates.
 
+### You only need the administrator once
+
+The role assignment is scoped to `rg-leostream-poc`, and both it and the Entra
+application outlive the VMs. So as long as you keep the resource group, a
+redeployment inherits the grant and the same client secret keeps working:
+
+```powershell
+./Remove-LeostreamPoC.ps1     # deletes the VMs, disks, IPs and NAT gateway; keeps the RG
+./Deploy-LeostreamPoC.ps1     # redeploys into the same RG
+```
+
+That is the default behaviour — an empty resource group is free, and keeping it
+is what saves you a second request to an Owner or User Access Administrator.
+`Deploy-LeostreamPoC.ps1` reports at the end whether the application and its
+role assignment survived.
+
+Two things undo it, both opt-in: `-RemoveResourceGroup` (the assignment is
+scoped to the group, so it dies with it, and a new group of the same name does
+not inherit it) and `-RemoveAzureCenterApp` (deletes the application, service
+principal and secret). Use them only when you are finished for good.
+
 ### What the center needs from the network
 
 The Broker calls the Azure management API itself, over `natgw-leostream`. It
