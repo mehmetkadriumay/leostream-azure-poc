@@ -227,8 +227,13 @@ non-default key name — the README explains why and gives two forms that do.
    Gateway.
 
 That is the full extent of what this PoC configures. Do **not** add an Azure
-center: a center discovers and power-manages desktop VMs, and there are none
+center yet: a center discovers and power-manages desktop VMs, and there are none
 here. Pools, policies and assignments likewise require at least one desktop.
+
+When you are ready to go further,
+[leostream-configuration.md](leostream-configuration.md) walks through the
+center form, image preparation, pools, provisioning, plans, policies and the
+Test Login check, field by field.
 
 ## 7. Validate
 
@@ -285,6 +290,19 @@ create a bare application (no API permissions, no redirect URI) and run
 
 Re-running the script is safe: it reuses an existing application, service
 principal and role assignment instead of creating duplicates.
+
+### What the center needs from the network
+
+The Broker calls the Azure management API itself, over `natgw-leostream`. It
+needs outbound 443 to `login.microsoftonline.com`, `management.azure.com` and
+`*.blob.core.windows.net`, all of which change IP address between calls.
+`./Test-LeostreamPoC.ps1` probes these from inside the Broker and verifies the
+TLS handshake completes, which catches an intercepting proxy that would pass a
+plain connectivity test and then break the API.
+
+Set *Authentication* to **Application Key** and *Region* to the value in
+`Azure.Location`. A center manages exactly one region and can provision only
+into resource groups in that region.
 
 ## 9. Adding a desktop later (optional)
 

@@ -47,6 +47,20 @@ Broker and Gateway are separate VMs by design. `Deploy-LeostreamPoC.ps1` throws
 if the two names in config are identical, and `Test-LeostreamPoC.ps1` checks the
 same thing after the fact.
 
+### Why the Broker is the larger VM
+
+Leostream's floor for a Connection Broker is 2 vCPU, 8 GB RAM and 20 GB of disk,
+on RHEL 9.6 or later — or Rocky Linux or AlmaLinux. RHEL 8 and CentOS Stream 9
+are not supported, and a Broker on RHEL 8 cannot be upgraded in place.
+
+In a cloud the hypervisor reserves part of the instance, so a size with
+*exactly* 8 GB trips the Broker's own health checks. `Standard_D4s_v5` (4 vCPU,
+16 GB) is the smallest comfortable choice; `Standard_D2s_v5` is exactly 8 GB and
+would warn. The Gateway has no such requirement and stays on `D2s_v5`.
+
+`Test-LeostreamPoC.ps1` reports a `Sizing` warning if the Broker is shrunk below
+this.
+
 ## Network security
 
 `nsg-leostream` carries exactly two explicit rules:
@@ -55,6 +69,12 @@ same thing after the fact.
 |---|---|---|---|---|---|
 | 100 | `Allow-HTTPS-Inbound` | Inbound | `AllowedClientCidrs` | `10.50.1.0/24` | 443 |
 | 110 | `Allow-SSH-Inbound` | Inbound | `AllowedClientCidrs` | `10.50.1.0/24` | 22 |
+
+Leostream also lists inbound 80, which serves the HTTP-to-HTTPS redirect on the
+administrator interface and lets certbot answer an ACME http-01 challenge when
+replacing the self-signed certificate. Neither applies here — the admin UI is
+reached over an SSH tunnel on 443 — so the rule is opt-in: set `Ports.Http = 80`
+in `poc.config.psd1` and redeploy to add `Allow-HTTP-Inbound` at priority 120.
 
 Nothing else is required, because Azure's default rules already provide what is
 needed:

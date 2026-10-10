@@ -89,6 +89,7 @@ leostream-azure-poc/
 ├── docs/
 │   ├── architecture.md              # design, topology, traffic flows
 │   ├── installation.md              # step-by-step deployment guide
+│   ├── leostream-configuration.md   # centers, pools, provisioning, policies
 │   └── validation.md                # acceptance checks and negative tests
 └── scripts/
     ├── Deploy-LeostreamPoC.ps1          # RG, VNet, 1 subnet, 1 NSG, 2 VMs
@@ -523,6 +524,17 @@ Open the Broker UI through the SSH tunnel above, then:
 
 Steps 1–4 are all this PoC exercises.
 
+Going further — an Azure center, desktop images, pools, provisioning, plans,
+policies and user assignment — is covered field by field in
+[docs/leostream-configuration.md](docs/leostream-configuration.md), which
+follows Leostream's Azure quick-start guide and notes where this PoC's network
+layout changes the answer.
+
+> **Entra ID is not an Active Directory authentication server.** *Setup >
+> Authentication Servers* speaks LDAP; Entra ID is a SAML identity provider to
+> Leostream and is configured separately. Pointing the Active Directory form at
+> Entra ID fails with bind errors.
+
 ---
 
 ## Azure Center credentials
@@ -600,11 +612,24 @@ Other options:
 > Put it straight into the Broker UI or Key Vault; if you lose it, re-run with
 > `-RotateSecret`.
 
-Then, in the Broker UI: *Setup > Centers > Add Center > Microsoft Azure*, and
-enter subscription ID, tenant ID, application ID and the secret. Continue with
-*Configuration > Pools*, *Policies* and *Assignments*. For desktops, add a
-Windows VM to `snet-leostream` and install the Leostream Agent pointing at
-`10.50.1.10`.
+Then, in the Broker UI: *Setup > Centers > Add Center > Microsoft Azure*, set
+*Authentication* to **Application Key**, pick the region matching
+`Azure.Location`, and enter subscription ID, tenant ID, application ID and the
+secret. The full form — and what to do next with pools, provisioning, plans and
+policies — is in
+[docs/leostream-configuration.md](docs/leostream-configuration.md).
+
+A center only ever sees one region, and can only provision into resource groups
+that exist in that region. `rg-leostream-poc` is created in `Azure.Location`, so
+keep the two in step.
+
+The Broker reaches the Azure API directly through `natgw-leostream` and needs
+outbound 443 to `login.microsoftonline.com`, `management.azure.com` and
+`*.blob.core.windows.net`. These resolve to different addresses on every call,
+so an IP allow-list will not hold. `./Test-LeostreamPoC.ps1` probes this from
+inside the Broker. Where that egress is genuinely impossible, the Leostream
+Gateway can forward the Azure API instead — *Use a Leostream Gateway to
+communicate with this Center*.
 
 The Broker's system-assigned managed identity is still deployed and verified, so
 you can switch to the managed-identity model later if someone grants it a role.

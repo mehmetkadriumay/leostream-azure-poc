@@ -86,6 +86,15 @@
     VirtualMachines = @{
         Broker = @{
             Name            = 'leo-broker-01'
+
+            # Leostream's floor for a Connection Broker is 2 vCPU, 8 GB RAM and
+            # 20 GB of disk, on RHEL 9.6 or later (or Rocky/AlmaLinux). RHEL 8
+            # and CentOS Stream 9 are not supported and cannot be upgraded into.
+            #
+            # In a cloud the hypervisor reserves part of the instance, so an
+            # exactly-8 GB size trips the Broker's own health checks. D4s_v5
+            # (4 vCPU, 16 GB) is the smallest comfortable choice; D2s_v5 is
+            # exactly 8 GB and will warn. Test-LeostreamPoC.ps1 checks this.
             Size            = 'Standard_D4s_v5'
             PrivateIp       = '10.50.1.10'
             PublicIp        = $false
@@ -128,5 +137,12 @@
     Ports = @{
         Https = 443
         Ssh   = 22
+
+        # Leostream also lists inbound 80 for the HTTP-to-HTTPS redirect on the
+        # administrator interface, and it is what certbot needs to answer an
+        # ACME http-01 challenge if you replace the self-signed certificate.
+        # This PoC reaches the admin UI over an SSH tunnel on 443, so 80 is not
+        # opened. Set this to 80 if you want the rule.
+        Http  = $null
     }
 }

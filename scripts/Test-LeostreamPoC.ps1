@@ -17,10 +17,16 @@
         * both VMs running
         * Broker has a system-assigned managed identity
 
+      Sizing
+        * Broker meets the documented minimum (2 vCPU, more than 8 GB RAM,
+          20 GB disk)
+
       Services
         * Gateway TCP/443 and TCP/22 reachable from the current machine
         * Broker HTTPS reachable from inside the VNet (via RunCommand on the
           Gateway)
+        * Broker can reach the Azure management endpoints an Azure Center
+          needs (via RunCommand on the Broker)
 
 .PARAMETER SkipRemoteChecks
     Only perform Azure control-plane checks (no RunCommand invocations).
@@ -208,6 +214,56 @@ if ($brokerVm) {
     }
 }
 
+# --- Broker sizing ------------------------------------------------------------
+# Leostream publishes a hard floor for the Connection Broker: 2 vCPU, 8 GB RAM
+# and 20 GB of disk. In a cloud the hypervisor reserves part of the instance, so
+# an exactly-8 GB size trips the Broker's own health checks - hence "more than
+# 8 GB" rather than "at least 8 GB".
+if ($brokerVm) {
+    $sizeName = $brokerVm.HardwareProfile.VmSize
+
+    # Get-AzVMSize -Location was removed in Az.Compute 11; the resource SKU API
+    # is the supported way to read a size's capabilities without owning a VM of
+    # that size.
+    $sku = Get-AzComputeResourceSku -Location $rg.Location -ErrorAction SilentlyContinue |
+        Where-Object { $_.ResourceType -eq 'virtualMachines' -and $_.Name -eq $sizeName } |
+        Select-Object -First 1
+
+    $cores    = $null
+    $memoryGb = $null
+    if ($sku) {
+        $cores    = [int]   ($sku.Capabilities | Where-Object Name -eq 'vCPUs'   | Select-Object -First 1).Value
+        $memoryGb = [double]($sku.Capabilities | Where-Object Name -eq 'MemoryGB' | Select-Object -First 1).Value
+    }
+
+    if (-not $cores -or -not $memoryGb) {
+        Add-Result -Area 'Sizing' -Check 'Broker meets the Leostream minimum' -Status Skip `
+            -Detail "could not read the capabilities of '$sizeName' in $($rg.Location)"
+    }
+    else {
+        $shortfall = @()
+        if ($cores -lt 2)    { $shortfall += "$cores vCPU (needs 2)" }
+        if ($memoryGb -le 8) { $shortfall += "$memoryGb GB RAM (needs more than 8)" }
+
+        if ($shortfall.Count -eq 0) {
+            Add-Result -Area 'Sizing' -Check 'Broker meets the Leostream minimum' -Status Pass `
+                -Detail "$sizeName - $cores vCPU, $memoryGb GB RAM"
+        }
+        else {
+            Add-Result -Area 'Sizing' -Check 'Broker meets the Leostream minimum' -Status Warn `
+                -Detail "$sizeName - $($shortfall -join '; '). Expect Connection Broker health-check warnings."
+        }
+    }
+
+    $osDiskGb = $brokerVm.StorageProfile.OsDisk.DiskSizeGB
+    if ($osDiskGb -and $osDiskGb -lt 20) {
+        Add-Result -Area 'Sizing' -Check 'Broker OS disk at least 20 GB' -Status Warn -Detail "$osDiskGb GB"
+    }
+    else {
+        Add-Result -Area 'Sizing' -Check 'Broker OS disk at least 20 GB' -Status Pass -Detail "$osDiskGb GB"
+    }
+}
+
 # --- Azure Center credentials -------------------------------------------------
 # Optional: only meaningful once Configure-LeostreamAzureCenter.ps1 has run, so
 # a missing application is a Skip rather than a failure.
@@ -310,6 +366,57 @@ if (-not $SkipRemoteChecks) {
         Add-Result -Area 'Service' -Check 'Broker HTTPS reachable from Gateway' -Status Skip -Detail $_.Exception.Message
     }
 
+    # An Azure Center is the Broker talking to the Azure management API directly.
+    # Leostream documents three endpoints it must reach on 443:
+    # login.microsoftonline.com, management.azure.com and *.blob.core.windows.net.
+    # The Broker is private, so this depends entirely on the NAT gateway and on
+    # nothing upstream filtering egress. When it is broken the Center fails with
+    # an opaque authentication error hours later, so check it here instead.
+    try {
+        $egress = @'
+for host in login.microsoftonline.com management.azure.com; do
+  if timeout 10 bash -c "</dev/tcp/$host/443" 2>/dev/null; then
+    echo "OK $host"
+  else
+    echo "FAIL $host"
+  fi
+done
+# A TLS-intercepting proxy passes the TCP test but breaks the API. 401 is the
+# expected unauthenticated answer and proves the full TLS path works.
+code=$(timeout 15 curl -s -o /dev/null -w '%{http_code}' 'https://management.azure.com/subscriptions?api-version=2020-01-01' 2>/dev/null)
+echo "TLS $code"
+'@
+        $res = Invoke-AzVMRunCommand -ResourceGroupName $rgName -VMName $brokerSpec.Name `
+            -CommandId 'RunShellScript' -ScriptString $egress -ErrorAction Stop
+        $message = ($res.Value | ForEach-Object { $_.Message }) -join "`n"
+
+        $failed = @([regex]::Matches($message, 'FAIL (\S+)') | ForEach-Object { $_.Groups[1].Value })
+        if ($failed.Count -gt 0) {
+            Add-Result -Area 'AzureCenter' -Check 'Broker can reach the Azure management endpoints' -Status Fail `
+                -Detail "unreachable on 443: $($failed -join ', '). An Azure Center cannot authenticate - check the NAT gateway and any egress firewall."
+        }
+        else {
+            Add-Result -Area 'AzureCenter' -Check 'Broker can reach the Azure management endpoints' -Status Pass `
+                -Detail 'login.microsoftonline.com, management.azure.com'
+        }
+
+        if ($message -match 'TLS (\d{3})') {
+            $code = $Matches[1]
+            if ($code -eq '401') {
+                Add-Result -Area 'AzureCenter' -Check 'Azure management API answers over TLS' -Status Pass -Detail 'HTTP 401 as expected (unauthenticated)'
+            }
+            elseif ($code -eq '000') {
+                Add-Result -Area 'AzureCenter' -Check 'Azure management API answers over TLS' -Status Fail `
+                    -Detail 'TLS handshake failed - likely an intercepting proxy or blocked egress'
+            }
+            else {
+                Add-Result -Area 'AzureCenter' -Check 'Azure management API answers over TLS' -Status Warn -Detail "HTTP $code"
+            }
+        }
+    }
+    catch {
+        Add-Result -Area 'AzureCenter' -Check 'Broker can reach the Azure management endpoints' -Status Skip -Detail $_.Exception.Message
+    }
 }
 
 # --- summary ------------------------------------------------------------------

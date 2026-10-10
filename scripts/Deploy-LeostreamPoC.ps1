@@ -180,6 +180,19 @@ $rules = @(
         -DestinationAddressPrefix $net.SubnetPrefix -DestinationPortRange '22'
 )
 
+# Leostream also documents inbound 80, which serves the HTTP-to-HTTPS redirect
+# on the admin interface and lets certbot answer an ACME http-01 challenge when
+# you replace the self-signed certificate. Neither is needed for this PoC - the
+# admin UI is reached over an SSH tunnel on 443 - so it stays opt-in.
+if ($config.Ports.Contains('Http') -and $config.Ports.Http) {
+    $rules += New-AzNetworkSecurityRuleConfig `
+        -Name 'Allow-HTTP-Inbound' `
+        -Description 'HTTP-to-HTTPS redirect and ACME http-01 certificate challenges' `
+        -Priority 120 -Direction Inbound -Access Allow -Protocol Tcp `
+        -SourceAddressPrefix $allowedClients -SourcePortRange '*' `
+        -DestinationAddressPrefix $net.SubnetPrefix -DestinationPortRange "$($config.Ports.Http)"
+}
+
 $nsg = Get-AzNetworkSecurityGroup -ResourceGroupName $rgName -Name $net.NsgName -ErrorAction SilentlyContinue
 if ($nsg) {
     Write-Ok 'Already exists - updating rules.'
