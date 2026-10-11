@@ -130,7 +130,13 @@
 
     Admin = @{
         LinuxUsername    = 'leoadmin'
-        # Path to an existing SSH public key used for both RHEL VMs.
+        # Public half of the SSH key deployed to both RHEL VMs. The matching
+        # private key is what you pass to 'ssh -i' afterwards.
+        # Create it with:
+        #   ssh-keygen -t rsa -b 4096 -C "leostream-poc" -f "$HOME\.ssh\id_rsa"
+        # Azure accepts RSA (>=2048 bits) and ED25519 only; ECDSA is rejected.
+        # Set before the first deployment - changing it later does not re-key
+        # a VM that already exists.
         SshPublicKeyPath = '~/.ssh/id_rsa.pub'
     }
 

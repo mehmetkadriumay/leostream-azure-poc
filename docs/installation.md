@@ -12,7 +12,7 @@ running inside the VMs.
 | Az modules | `Install-Module Az -Scope CurrentUser` |
 | Azure rights | **Contributor**. User Access Administrator is *not* needed — no role assignments are created |
 | Quota | ~6 vCPUs of the `Dsv5` family in your region |
-| SSH key | Either reuse `~/.ssh/id_rsa.pub`, which is the config default, or generate `ssh-keygen -t ed25519 -C "leostream-poc" -f $HOME\.ssh\leostream_poc` **and** point `Admin.SshPublicKeyPath` at it |
+| SSH key | `~/.ssh/id_rsa`, the config default. Check with `Test-Path $HOME\.ssh\id_rsa.pub`; if `False`, create it with `ssh-keygen -t rsa -b 4096 -C "leostream-poc" -f "$HOME\.ssh\id_rsa"`. Azure accepts only RSA (≥2048) and ED25519 |
 | Leostream media | Nothing to download by hand. The packages come from the public URLs in `poc.config.psd1`. An evaluation licence key is still needed |
 | Your egress IP | `(Invoke-RestMethod https://api.ipify.org?format=json).ip` |
 
@@ -24,7 +24,7 @@ Edit `config/poc.config.psd1`. Two values matter before the first deployment:
 AllowedClientCidrs = @('203.0.113.45/32')   # your egress IP, not 0.0.0.0/0
 Admin = @{
     LinuxUsername    = 'leoadmin'
-    SshPublicKeyPath = '~/.ssh/id_rsa.pub'   # or your dedicated PoC key
+    SshPublicKeyPath = '~/.ssh/id_rsa.pub'   # the default; leave as-is
 }
 ```
 
@@ -32,9 +32,10 @@ Leaving `AllowedClientCidrs` at `0.0.0.0/0` opens both HTTPS and SSH to the
 internet. The deployment script warns you, but does not stop.
 
 `SshPublicKeyPath` decides which key ends up on both VMs, and therefore which
-private key you must pass to `ssh -i` from then on. If you generated a dedicated
-key such as `~/.ssh/leostream_poc.pub`, change this value **before** deploying —
-changing it afterwards has no effect on VMs that already exist. Verify it now:
+private key you must pass to `ssh -i` from then on. The default suits the key
+created in the prerequisites. If you point it at a different key, do so
+**before** deploying — changing it afterwards has no effect on VMs that already
+exist. Verify it now:
 
 ```powershell
 $pub = (Import-PowerShellDataFile ./config/poc.config.psd1).Admin.SshPublicKeyPath
@@ -179,7 +180,7 @@ The Broker has no public IP, so forward a local port to it through the Gateway.
 **Run this on your own Windows PC, in PowerShell** — not in Cloud Shell and not
 inside either VM. `-L` is an instruction to your local SSH client, and your
 private key only exists on your PC. If you see an error mentioning a path like
-`/home/leoadmin.sshleostream_poc`, you are in a bash shell inside a VM; type
+`/home/leoadmin.sshid_rsa`, you are in a bash shell inside a VM; type
 `exit` first.
 
 ```powershell

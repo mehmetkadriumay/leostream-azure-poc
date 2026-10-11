@@ -103,7 +103,10 @@ if ($sshKeyPath -like '~*') {
     $sshKeyPath = Join-Path $HOME ($sshKeyPath.TrimStart('~', '/', '\'))
 }
 if (-not (Test-Path -Path $sshKeyPath)) {
-    throw "SSH public key not found at '$sshKeyPath'. Generate one with: ssh-keygen -t ed25519 -C leostream-poc"
+    # Name the exact private-key path the config implies. A generic ssh-keygen
+    # line would create a differently named key and fail this check again.
+    $privateKeyPath = $sshKeyPath -replace '\.pub$', ''
+    throw "SSH public key not found at '$sshKeyPath'. Generate the pair with: ssh-keygen -t rsa -b 4096 -C `"leostream-poc`" -f `"$privateKeyPath`""
 }
 $sshPublicKey = (Get-Content -Path $sshKeyPath -Raw).Trim()
 

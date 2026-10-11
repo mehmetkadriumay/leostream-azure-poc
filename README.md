@@ -110,30 +110,76 @@ leostream-azure-poc/
 | Az modules | `Az.Accounts`, `Az.Resources`, `Az.Network`, `Az.Compute` (11.0+) |
 | Azure permissions | **Contributor** on the subscription or resource group is enough to deploy. Only the optional Azure Center *role assignment* needs Owner or User Access Administrator, and that step degrades gracefully — see [Azure Center credentials](#azure-center-credentials) |
 | Azure quota | ~6 vCPUs of the `Dsv5` family in the target region |
-| SSH key pair | For the two RHEL 9 VMs |
+| SSH key pair | For the two RHEL 9 VMs — see [Create the SSH key](#create-the-ssh-key) |
 | Leostream | An evaluation licence. The installer packages download automatically from the public URLs in `poc.config.psd1` |
 
 ```powershell
 Install-Module Az -Scope CurrentUser -Repository PSGallery -Force
 ```
 
-For the SSH key you have two options:
+### Create the SSH key
+
+This PoC uses the standard default key, `~/.ssh/id_rsa`. `poc.config.psd1`
+already points at it, so if you follow this section there is **nothing to edit**
+in the config.
+
+First check whether you already have one:
 
 ```powershell
-# Option A - reuse your existing default key. Nothing else to change;
-# poc.config.psd1 already points at ~/.ssh/id_rsa.pub.
-Get-ChildItem $HOME\.ssh\id_rsa.pub
-
-# Option B - generate a key dedicated to this PoC...
-ssh-keygen -t ed25519 -C "leostream-poc" -f $HOME\.ssh\leostream_poc
-# ...and then set this in config/poc.config.psd1 BEFORE deploying:
-#   SshPublicKeyPath = '~/.ssh/leostream_poc.pub'
+Test-Path $HOME\.ssh\id_rsa.pub
 ```
 
-Whichever you choose, `Admin.SshPublicKeyPath` in the config must point at the
-**public** key (`.pub`), and the matching **private** key is what you pass to
-`ssh -i` later. If the two disagree you will deploy one key and authenticate with
-another, which fails with `Permission denied (publickey)`.
+**If that printed `True`, you are done — skip to [Quick start](#quick-start).**
+
+If it printed `False`, create the pair:
+
+```powershell
+ssh-keygen -t rsa -b 4096 -C "leostream-poc" -f "$HOME\.ssh\id_rsa"
+```
+
+`ssh-keygen` ships with Windows 10/11 as part of the OpenSSH client. If the
+command is not found, install it with
+`Add-WindowsCapability -Online -Name OpenSSH.Client~~~~0.0.1.0` from an elevated
+prompt.
+
+You will be prompted twice for a passphrase. Press **Enter** both times for no
+passphrase (simplest for a PoC), or set one — in which case run
+`Start-Service ssh-agent; ssh-add $HOME\.ssh\id_rsa` so you are not retyping it
+on every hop.
+
+That creates two files:
+
+| File | What it is | Where it goes |
+|---|---|---|
+| `id_rsa` | **Private** key — never leave your PC, never commit | Stays local; this is what `ssh -i` uses |
+| `id_rsa.pub` | **Public** key — safe to share | Deployed into `authorized_keys` on both VMs |
+
+Verify the result before deploying:
+
+```powershell
+ssh-keygen -l -f $HOME\.ssh\id_rsa.pub
+```
+
+The output ends with the key type and begins with its bit length, for example
+`4096 SHA256:... (RSA)`. A pre-existing key may report `2048`, which Azure still
+accepts. What matters is that the type reads `(RSA)` or `(ED25519)`.
+
+> [!IMPORTANT]
+> Azure accepts only **RSA (≥2048 bits)** and **ED25519** keys. ECDSA keys are
+> rejected. If you already have a default key, confirm it is one of the two with
+> the `ssh-keygen -l` command above.
+
+> [!WARNING]
+> If `~/.ssh/id_rsa` already exists, `ssh-keygen` offers to overwrite it.
+> Answering `y` **permanently destroys** the old key and locks you out of
+> everything that trusts it. Only generate when the `Test-Path` above returned
+> `False`.
+
+Using a different key is supported — point `Admin.SshPublicKeyPath` at its
+`.pub` file. Whatever you choose, the config must name the **public** half and
+the matching **private** half is what `ssh -i` uses later; if the two disagree
+you deploy one key and authenticate with another, which fails with
+`Permission denied (publickey)`.
 
 ---
 
@@ -143,7 +189,9 @@ another, which fails with `Permission denied (publickey)`.
 git clone https://github.com/mehmetkadriumay/leostream-azure-poc.git
 cd leostream-azure-poc
 
-# 1. Edit config/poc.config.psd1 - at minimum set AllowedClientCidrs and SshPublicKeyPath
+# 1. Edit config/poc.config.psd1 - at minimum set AllowedClientCidrs.
+#    SshPublicKeyPath already points at ~/.ssh/id_rsa.pub; leave it unless
+#    you deliberately use a different key.
 code config/poc.config.psd1
 
 # 2. Sign in. -Tenant matters if your account is in more than one directory
@@ -279,7 +327,7 @@ Two symptoms that mean you are in the wrong shell:
 
 | Error | What happened |
 |---|---|
-| `Identity file /home/leoadmin.sshleostream_poc not accessible` | You ran it inside a VM. Bash expanded `$HOME` to the Linux home directory and silently ate the `\` characters in the Windows path. Type `exit` to get back to PowerShell. |
+| `Identity file /home/leoadmin.sshid_rsa not accessible` | You ran it inside a VM. Bash expanded `$HOME` to the Linux home directory and silently ate the `\` characters in the Windows path. Type `exit` to get back to PowerShell. |
 | `ssh: Could not resolve hostname $gw` | You ran it in a bash shell, where PowerShell variables do not exist. |
 
 ### Prerequisites on your PC
@@ -326,7 +374,7 @@ Both checks matter:
   not exist, and you will get `Identity file ... not accessible`. The usual cause
   is generating a key under one name while `Admin.SshPublicKeyPath` still points
   at another. The config default is `~/.ssh/id_rsa.pub`, so unless you changed
-  it, the private key is `~/.ssh/id_rsa` — **not** `leostream_poc`.
+  it, the private key is `~/.ssh/id_rsa`.
 
 PowerShell variables are **per window**. Open a new terminal and they are all
 empty again, so re-run this block each time.
@@ -371,7 +419,7 @@ both hops, and is never copied to the Gateway.
 > to authenticate with. You can confirm this on the Gateway:
 >
 > ```bash
-> ls -la ~/.ssh/          # authorized_keys only; no id_* and no leostream_poc
+> ls -la ~/.ssh/          # authorized_keys only; no id_* keys of your own
 > ```
 >
 > The `ProxyCommand` above exists precisely to avoid this. The Gateway merely
@@ -453,14 +501,14 @@ already taken.
 | Symptom | Cause | Fix |
 |---|---|---|
 | `Invalid -J argument` | `$gw` is empty | Re-run step 1 and confirm `$gw` prints an IP |
-| `Identity file ... not accessible: No such file or directory` | The key named in `-i` does not exist. Usually you generated `leostream_poc` but left `Admin.SshPublicKeyPath` at the default `~/.ssh/id_rsa.pub`, or the reverse | `Get-ChildItem $HOME\.ssh` to see what you actually have, then make the config and the `-i` path agree. Step 1 derives `$key` correctly |
+| `Identity file ... not accessible: No such file or directory` | The key named in `-i` does not exist — the key file and `Admin.SshPublicKeyPath` disagree | `Get-ChildItem $HOME\.ssh` to see what you actually have, then make the config and the `-i` path agree. Step 1 derives `$key` correctly |
 | Connection hangs, then times out | Your IP is not in `AllowedClientCidrs` | Check with `(Invoke-RestMethod https://api.ipify.org?format=json).ip`, add it to the config, re-run `Deploy-LeostreamPoC.ps1` |
 | `Permission denied (publickey)` | You are offering a different key from the one deployed, or the wrong username | Compare them — see *Checking which key is actually deployed* below |
 | `Permission denied (publickey)` naming the **Gateway** even though step 2 works | You used `-J`, and `-i` does not reach the jump host | Use the `ProxyCommand` form or the `~\.ssh\config` entry in step 3 |
 | `Permission denied (publickey,gssapi-keyex,gssapi-with-mic)` then `Connection closed by UNKNOWN port 65535`, when run **from the Gateway's shell** | There is no private key on the Gateway, by design — only your public key in `authorized_keys`. The Gateway cannot authenticate to the Broker on your behalf | Don't hop from inside the Gateway. Run the step 3 `ProxyCommand` from your PC instead. See the callout in step 3 |
 | You went looking for your key in `/home/leoadmin/.ssh` on a VM and it isn't there | Correct and expected. Private keys never leave your PC; VMs hold only `authorized_keys` | Nothing to fix — use step 3 from your PC |
 | Key works on one VM but not the other | The VMs were deployed at different times, or from different clones of this repo, with different `SshPublicKeyPath` values | Compare both VMs with the snippet below. Changing the config does **not** re-key an existing VM |
-| `Identity file ... not accessible` with a mangled path like `/home/leoadmin.sshleostream_poc` | Running in bash inside a VM, not PowerShell. Bash expanded `$HOME` to the Linux home and ate the `\` characters | `exit` back to PowerShell |
+| `Identity file ... not accessible` with a mangled path like `/home/leoadmin.sshid_rsa` | Running in bash inside a VM, not PowerShell. Bash expanded `$HOME` to the Linux home and ate the `\` characters | `exit` back to PowerShell |
 | Step 2 works but step 3 hangs | Broker VM is stopped or still booting | `Get-AzVM -ResourceGroupName $rg -Name leo-broker-01 -Status` |
 | Browser shows `ERR_CONNECTION_REFUSED` on localhost:8443 | Tunnel window closed, or the Broker software is not installed yet | Reopen the tunnel; check `systemctl status leostream` on the Broker |
 | `WARNING: UNPROTECTED PRIVATE KEY FILE` | Key file permissions too open | `icacls $key /inheritance:r /grant:r "$($env:USERNAME):(R)"` |
