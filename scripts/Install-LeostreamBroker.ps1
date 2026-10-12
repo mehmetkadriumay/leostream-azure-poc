@@ -217,6 +217,122 @@ $script = $template.
     Replace('__INSTALLER_URI__', $InstallerUri).
     Replace('__LICENSE_KEY__',   $plainLicense)
 
+# --- surviving a dropped connection -------------------------------------------
+# Invoke-AzVMRunCommand holds one HTTPS conversation with Azure open for the
+# whole run, and this install takes 10-20 minutes. A momentary network fault on
+# the operator's PC - VPN reconnect, Wi-Fi roam, sleep/resume - therefore
+# surfaces as "The SSL connection could not be established" even though
+# RunCommand executes *on the VM*, where the installation carries on to
+# completion. Failing there is wrong twice over: it reports a successful
+# install as broken, and it invites a blind re-run while the first is still
+# going.
+#
+# So on a transient client-side fault, ask the VM what actually happened rather
+# than give up. Azure runs one RunCommand per VM at a time, so this
+# verification call queues behind an install still in progress and only answers
+# once that install has finished - which is exactly the wait we want.
+
+$verifyScript = @'
+if rpm -q leostream-broker >/dev/null 2>&1 \
+   && systemctl is-active --quiet leostream-broker \
+   && curl -sk -o /dev/null --max-time 10 https://127.0.0.1/ ; then
+    echo LEOSTREAM_VERIFY_OK
+else
+    echo LEOSTREAM_VERIFY_INCOMPLETE
+fi
+'@
+
+function Test-TransientAzureError {
+    [OutputType([bool])]
+    param([Parameter(Mandatory)] $ErrorRecord)
+
+    $text = @()
+    $ex = $ErrorRecord.Exception
+    while ($ex) {
+        $text += $ex.Message
+        $ex = $ex.InnerException
+    }
+
+    $pattern = 'SSL connection could not be established|' +
+               'Unable to read data from the transport connection|' +
+               'An error occurred while sending the request|' +
+               'The operation was canceled|A task was canceled|' +
+               'HttpClient\.Timeout|forcibly closed|' +
+               'Unable to connect to the remote server|' +
+               'The remote name could not be resolved'
+
+    return [bool](($text -join ' ') -match $pattern)
+}
+
+function Get-VmCompletionState {
+    [OutputType([string])]
+    param(
+        [Parameter(Mandatory)] [string] $ResourceGroupName,
+        [Parameter(Mandatory)] [string] $VMName,
+        [Parameter(Mandatory)] [string] $VerifyScript
+    )
+
+    for ($i = 1; $i -le 5; $i++) {
+        try {
+            $probe = Invoke-AzVMRunCommand -ResourceGroupName $ResourceGroupName -VMName $VMName `
+                -CommandId 'RunShellScript' -ScriptString $VerifyScript -ErrorAction Stop
+            return (($probe.Value | ForEach-Object { $_.Message }) -join "`n")
+        }
+        catch {
+            if (-not (Test-TransientAzureError $_) -or $i -eq 5) { return '' }
+            Start-Sleep -Seconds 20
+        }
+    }
+    return ''
+}
+
+function Invoke-ResilientRunCommand {
+    [OutputType([string])]
+    param(
+        [Parameter(Mandatory)] [string] $ResourceGroupName,
+        [Parameter(Mandatory)] [string] $VMName,
+        [Parameter(Mandatory)] [string] $ScriptPath,
+        [Parameter(Mandatory)] [string] $VerifyScript,
+        [Parameter(Mandatory)] [string] $SuccessMarker,
+        [int] $MaxAttempts = 3
+    )
+
+    for ($attempt = 1; $attempt -le $MaxAttempts; $attempt++) {
+        try {
+            $result = Invoke-AzVMRunCommand -ResourceGroupName $ResourceGroupName -VMName $VMName `
+                -CommandId 'RunShellScript' -ScriptPath $ScriptPath -ErrorAction Stop
+
+            $text = ''
+            foreach ($out in $result.Value) {
+                Write-Host "--- $($out.DisplayStatus) ---" -ForegroundColor DarkGray
+                Write-Host $out.Message
+                $text += $out.Message
+            }
+            return $text
+        }
+        catch {
+            if (-not (Test-TransientAzureError $_)) { throw }
+
+            Write-Warning "Lost the connection to Azure while the command was running on $VMName."
+            Write-Warning "  $($_.Exception.Message)"
+            Write-Host '    RunCommand runs on the VM, so the work probably continued. Asking the VM...' -ForegroundColor Yellow
+
+            $state = Get-VmCompletionState -ResourceGroupName $ResourceGroupName -VMName $VMName -VerifyScript $VerifyScript
+            if ($state -match 'LEOSTREAM_VERIFY_OK') {
+                Write-Host '    It finished on the VM despite the dropped connection.' -ForegroundColor Green
+                return $SuccessMarker
+            }
+
+            if ($attempt -ge $MaxAttempts) { break }
+            Write-Host "    Not finished yet. Retrying (attempt $($attempt + 1) of $MaxAttempts)..." -ForegroundColor Yellow
+            Start-Sleep -Seconds 15
+        }
+    }
+
+    throw ("Lost the connection to Azure $MaxAttempts time(s) while installing on $VMName, and the VM does not report a " +
+           'finished installation. This script is idempotent - check your network and run it again.')
+}
+
 if ($PSCmdlet.ShouldProcess($spec.Name, 'Install Leostream Platform 26')) {
     $tempFile = New-TemporaryFile
     try {
@@ -226,18 +342,12 @@ if ($PSCmdlet.ShouldProcess($spec.Name, 'Install Leostream Platform 26')) {
         $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
         [System.IO.File]::WriteAllText($tempFile.FullName, $script.Replace("`r`n", "`n"), $utf8NoBom)
         Write-Host "==> Running installation on $($spec.Name). This can take several minutes." -ForegroundColor Cyan
-        $result = Invoke-AzVMRunCommand `
+        $combined = Invoke-ResilientRunCommand `
             -ResourceGroupName $rgName `
             -VMName $spec.Name `
-            -CommandId 'RunShellScript' `
-            -ScriptPath $tempFile.FullName
-
-        $combined = ''
-        foreach ($out in $result.Value) {
-            Write-Host "--- $($out.DisplayStatus) ---" -ForegroundColor DarkGray
-            Write-Host $out.Message
-            $combined += $out.Message
-        }
+            -ScriptPath $tempFile.FullName `
+            -VerifyScript $verifyScript `
+            -SuccessMarker '=== Broker preparation complete ==='
 
         # 'Enable succeeded' only means the RunCommand extension ran; it says
         # nothing about the script's exit code. The script runs under
