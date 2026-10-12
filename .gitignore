@@ -69,13 +69,22 @@ PowerShell_transcript.*
 *.trx
 
 # ---------------------------------------------------------------------------
-# Terraform / Bicep build artefacts (if added later)
+# Terraform state and local variable files
+#
+# State can contain secrets, and *.tfvars is where licence keys and narrowed
+# client CIDRs end up. terraform.tfvars.example is committed on purpose, and so
+# is .terraform.lock.hcl, which pins provider versions.
 # ---------------------------------------------------------------------------
 *.tfstate
 *.tfstate.*
 .terraform/
+.terraform.tfstate.lock.info
 *.tfvars
 !example.tfvars
+!*.tfvars.example
+*.tfplan
+crash.log
+crash.*.log
 *.bicepparam.local
 
 # ---------------------------------------------------------------------------

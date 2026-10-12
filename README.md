@@ -18,6 +18,7 @@ Connection Broker and a separate internet-facing Leostream Gateway. Nothing else
 - [Quick start](#quick-start)
 - [Configuration](#configuration)
 - [Deployment](#deployment)
+- [Deploying with Terraform](#deploying-with-terraform)
 - [Administrative access](#administrative-access)
 - [Leostream configuration](#leostream-configuration)
 - [Azure Center credentials](#azure-center-credentials)
@@ -91,13 +92,24 @@ leostream-azure-poc/
 │   ├── installation.md              # step-by-step deployment guide
 │   ├── leostream-configuration.md   # centers, pools, provisioning, policies
 │   └── validation.md                # acceptance checks and negative tests
-└── scripts/
-    ├── Deploy-LeostreamPoC.ps1          # RG, VNet, 1 subnet, 1 NSG, 2 VMs
-    ├── Install-LeostreamBroker.ps1      # Platform 26 on leo-broker-01
-    ├── Install-LeostreamGateway.ps1     # Gateway on leo-gateway-01
-    ├── Configure-LeostreamAzureCenter.ps1  # Entra app + secret + role for a Center
-    ├── Test-LeostreamPoC.ps1            # validation
-    └── Remove-LeostreamPoC.ps1          # teardown
+├── scripts/
+│   ├── Deploy-LeostreamPoC.ps1          # RG, VNet, 1 subnet, 1 NSG, 2 VMs
+│   ├── Install-LeostreamBroker.ps1      # Platform 26 on leo-broker-01
+│   ├── Install-LeostreamGateway.ps1     # Gateway on leo-gateway-01
+│   ├── Configure-LeostreamAzureCenter.ps1  # Entra app + secret + role for a Center
+│   ├── Test-LeostreamPoC.ps1            # validation
+│   └── Remove-LeostreamPoC.ps1          # teardown
+└── terraform/                       # alternative to the PowerShell deployment
+    ├── README.md                    # Terraform-specific guide
+    ├── versions.tf                  # provider requirements and configuration
+    ├── variables.tf                 # mirrors config/poc.config.psd1
+    ├── main.tf                      # RG, NSG, NAT gateway, VNet, NICs, VMs
+    ├── install.tf                   # Leostream install via Azure Run Command
+    ├── outputs.tf                   # IPs, SSH commands, identity object ID
+    ├── terraform.tfvars.example     # copy to terraform.tfvars
+    └── scripts/
+        ├── install-broker.sh        # plain bash, shared shape with the PS1
+        └── install-gateway.sh
 ```
 
 ---
@@ -300,6 +312,50 @@ resolves every dependency. CodeReady Builder is already enabled on the Azure
 RHEL 9 image.
 
 Full walkthrough: [docs/installation.md](docs/installation.md).
+
+---
+
+## Deploying with Terraform
+
+`terraform/` is a complete alternative to the PowerShell scripts. One
+`terraform apply` builds the same infrastructure *and* installs Leostream on
+both VMs, so it replaces `Deploy-LeostreamPoC.ps1`,
+`Install-LeostreamBroker.ps1` and `Install-LeostreamGateway.ps1`.
+
+```powershell
+cd terraform
+terraform init
+terraform apply
+```
+
+Pick one path and stay on it. Both create identically named resources, so
+running Terraform against a deployment built by the PowerShell scripts produces
+a plan that tries to recreate everything and fails on name conflicts. Tear the
+old deployment down first, or import it.
+
+| | PowerShell | Terraform |
+| --- | --- | --- |
+| Configuration | `config/poc.config.psd1` | `terraform/variables.tf`, `terraform.tfvars` |
+| Idempotency | Hand-written "does it exist" checks | State file and plan |
+| Install | Separate scripts, run when you choose | Part of `apply`, skip with `install_software = false` |
+| Teardown | `Remove-LeostreamPoC.ps1`, keeps the resource group | `terraform destroy`, see below |
+| Azure Center app | `Configure-LeostreamAzureCenter.ps1` | Not created; use the same script |
+
+> [!IMPORTANT]
+> `terraform destroy` deletes the resource group when Terraform created it, and
+> **a role assignment scoped to a resource group is destroyed with it**.
+> Once an administrator has granted the Broker's identity a role, set
+> `create_resource_group = false` so Terraform references the group instead of
+> owning it. This is the same reasoning behind `Remove-LeostreamPoC.ps1`
+> keeping the group by default.
+
+The variable defaults mirror `config/poc.config.psd1` exactly. If you change one,
+change the other, or the two paths drift apart.
+
+Validation is shared: `scripts/Test-LeostreamPoC.ps1` inspects Azure and the
+VMs, so it works regardless of which path deployed them.
+
+Full guide, including importing an existing deployment: [terraform/README.md](terraform/README.md).
 
 ---
 

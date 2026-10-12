@@ -1,0 +1,47 @@
+# Copy to terraform.tfvars and adjust. terraform.tfvars is gitignored.
+#
+#   Copy-Item terraform.tfvars.example terraform.tfvars
+#
+# Every value below is optional; the defaults in variables.tf already match
+# config/poc.config.psd1. Only uncomment what you actually want to change.
+
+# Subscription to deploy into. Leave unset to use the current az CLI
+# subscription or ARM_SUBSCRIPTION_ID.
+# subscription_id = "00000000-0000-0000-0000-000000000000"
+
+# location            = "westeurope"
+# resource_group_name = "rg-leostream-poc"
+
+# Set to false once an administrator has granted the Leostream service
+# principal a role on the resource group, or if the group already exists.
+# A role assignment is destroyed with its resource group and cannot be
+# recreated without that administrator, so Terraform should stop owning the
+# group at that point.
+# create_resource_group = true
+
+# Restrict who can reach the Gateway on 443 and 22. The default of
+# 0.0.0.0/0 maps to the Internet service tag and exposes the Gateway to
+# everyone, which is fine for a short-lived PoC and nothing else.
+# Find your address with: curl -s https://api.ipify.org
+# allowed_client_cidrs = ["203.0.113.4/32"]
+
+# The Broker has no public IP and Azure retired default outbound access in
+# September 2025. Leave the NAT gateway enabled or the install will fail on
+# repository timeouts.
+# nat_gateway_enabled = true
+
+# Path to the public key authorised on both VMs. Azure accepts RSA (2048 bits
+# or more) and ED25519 only. Create one with:
+#   ssh-keygen -t rsa -b 4096 -C "leostream-poc" -f "$HOME/.ssh/id_rsa"
+# ssh_public_key_path = "~/.ssh/id_rsa.pub"
+# admin_username      = "leoadmin"
+
+# Set to false to build infrastructure only and install Leostream later with
+# the PowerShell scripts.
+# install_software = true
+
+# Skips "dnf update" during installation. Much faster, leaves the OS unpatched.
+# skip_os_update = false
+
+# Never put a licence key in this file. Pass it through the environment:
+#   $env:TF_VAR_leostream_license_key = "..."
