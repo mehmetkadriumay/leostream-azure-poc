@@ -36,6 +36,14 @@
 # ssh_public_key_path = "~/.ssh/id_rsa.pub"
 # admin_username      = "leoadmin"
 
+# Publishes the Broker admin UI on the Gateway's public IP, so you can browse
+# to https://<gateway-ip>:8443/ without an SSH tunnel. Set to null to disable.
+#
+# This exposes the Leostream administrator console to whatever
+# allowed_client_cidrs permits. Change the Broker's default admin/leo
+# credentials before enabling it.
+# broker_admin_port = 8443
+
 # Set to false to build infrastructure only and install Leostream later with
 # the PowerShell scripts.
 # install_software = true

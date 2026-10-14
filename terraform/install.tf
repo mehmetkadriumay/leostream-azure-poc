@@ -25,6 +25,7 @@ locals {
     VM_NAME='${replace(var.gateway_name, "'", "'\\''")}'
     BROKER_ADDRESS='${replace(var.broker_private_ip, "'", "'\\''")}'
     OS_UPDATE_MODE='${var.skip_os_update ? "skip" : "update"}'
+    ADMIN_PORT='${var.broker_admin_port == null ? "" : tostring(var.broker_admin_port)}'
   EOT
 
   # The installer bodies are plain bash files so they need no Terraform

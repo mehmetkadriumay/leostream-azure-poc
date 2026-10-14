@@ -150,5 +150,20 @@
         # This PoC reaches the admin UI over an SSH tunnel on 443, so 80 is not
         # opened. Set this to 80 if you want the rule.
         Http  = $null
+
+        # Publishes the Broker's administrator interface on the Gateway's public
+        # IP, so you can reach it in a browser without an SSH tunnel. The
+        # Gateway forwards this port straight through to the Broker on 443 with
+        # a firewalld rule, so TLS stays end-to-end to the Broker and the
+        # Gateway's own web server never sees the traffic.
+        #
+        # Set to $null to disable and keep the admin interface reachable only
+        # through an SSH tunnel.
+        #
+        # SECURITY: this exposes the Leostream administrator console to whatever
+        # AllowedClientCidrs permits, which defaults to the whole internet.
+        # Change the Broker's default 'admin' / 'leo' credentials before you
+        # deploy with this enabled.
+        BrokerAdmin = 8443
     }
 }

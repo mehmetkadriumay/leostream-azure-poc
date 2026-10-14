@@ -38,6 +38,11 @@ output "ssh_to_broker" {
   value       = "ssh -J ${var.admin_username}@${azurerm_public_ip.gateway.ip_address} ${var.admin_username}@${var.broker_private_ip}"
 }
 
+output "broker_admin_url" {
+  description = "Broker administrator interface, published through the Gateway. Null when broker_admin_port is disabled, in which case use broker_admin_tunnel."
+  value       = var.broker_admin_port == null ? null : "https://${azurerm_public_ip.gateway.ip_address}:${var.broker_admin_port}/"
+}
+
 output "broker_admin_tunnel" {
   description = "Open an SSH tunnel, then browse to https://localhost:8443/ for the Broker admin interface."
   value       = "ssh -N -L 8443:${var.broker_private_ip}:443 ${var.admin_username}@${azurerm_public_ip.gateway.ip_address}"

@@ -61,6 +61,27 @@ firewall-cmd --permanent --add-port=443/tcp
 # deployment, and the network security group already restricts the source to
 # allowed_client_cidrs. Narrowing it again here would only risk locking you out.
 firewall-cmd --permanent --add-service=ssh
+
+# Publish the Broker's administrator interface on this VM's public IP, so it can
+# be reached in a browser without an SSH tunnel. This is a plain TCP forward, so
+# TLS terminates on the Broker and the certificate you see is the Broker's.
+#
+# An HTTP reverse proxy would be the obvious alternative, but the Leostream
+# Gateway's /etc/httpd/conf.d/leo.conf declares its <Location> blocks outside
+# any <VirtualHost>, which makes them global. A new vhost would inherit the
+# /app/... handlers that the Broker's own UI also uses, and those requests would
+# be answered by the Gateway's mod_perl instead of the Broker.
+if [ -n "$ADMIN_PORT" ]; then
+    echo "--- forwarding ${ADMIN_PORT}/tcp to the Broker on 443 ---"
+    # Masquerade is required: without it the Broker would reply straight to the
+    # client through the NAT gateway and the client would drop the packet as
+    # asymmetric. It must be permanent, because a firewall-cmd --reload resets
+    # the runtime configuration to whatever is on disk.
+    firewall-cmd --permanent --add-masquerade
+    firewall-cmd --permanent --add-port="${ADMIN_PORT}/tcp"
+    firewall-cmd --permanent --add-forward-port=port="${ADMIN_PORT}":proto=tcp:toaddr="${BROKER_ADDRESS}":toport=443
+fi
+
 firewall-cmd --reload
 
 echo '--- enabling EPEL ---'

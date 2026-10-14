@@ -125,6 +125,24 @@ variable "nat_gateway_idle_timeout_minutes" {
   default     = 10
 }
 
+variable "broker_admin_port" {
+  description = <<-EOT
+    Publishes the Broker's administrator interface on the Gateway's public IP,
+    so it can be reached in a browser without an SSH tunnel. The Gateway
+    forwards this port straight through to the Broker on 443, so TLS stays
+    end-to-end to the Broker.
+
+    Set to null to disable and reach the admin interface only over an SSH
+    tunnel.
+
+    SECURITY: this exposes the Leostream administrator console to whatever
+    allowed_client_cidrs permits, which defaults to the whole internet. Change
+    the Broker's default 'admin' / 'leo' credentials before enabling it.
+  EOT
+  type        = number
+  default     = 8443
+}
+
 variable "http_port" {
   description = <<-EOT
     Optional inbound HTTP port opened on the NSG, for the HTTP-to-HTTPS

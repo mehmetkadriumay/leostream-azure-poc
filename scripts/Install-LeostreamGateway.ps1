@@ -12,6 +12,8 @@
       * kernel forwarding settings required by the Leostream Gateway
       * downloads and runs the Leostream Gateway installer from a URI you supply
       * points the Gateway at the Broker's private address
+      * optionally forwards Ports.BrokerAdmin to the Broker on 443, so the
+        administrator interface is reachable without an SSH tunnel
 
     No installers, certificates or licence material are stored in this
     repository.
@@ -50,6 +52,12 @@ $rgName = $config.Azure.ResourceGroupName
 $spec   = $config.VirtualMachines.Gateway
 
 if (-not $BrokerAddress) { $BrokerAddress = $config.VirtualMachines.Broker.PrivateIp }
+
+# Empty disables the forward, leaving the admin UI reachable only over SSH.
+$adminPort = ''
+if ($config.Ports.Contains('BrokerAdmin') -and $config.Ports.BrokerAdmin) {
+    $adminPort = "$($config.Ports.BrokerAdmin)"
+}
 
 if (-not $InstallerUri) {
     $InstallerUri = $config.Leostream.GatewayInstallerUri
@@ -123,6 +131,28 @@ firewall-cmd --permanent --add-port=443/tcp
 # deployment, and nsg-leostream already restricts the source to
 # AllowedClientCidrs. Narrowing it again here would only risk locking you out.
 firewall-cmd --permanent --add-service=ssh
+
+# Publish the Broker's administrator interface on this VM's public IP, so it can
+# be reached in a browser without an SSH tunnel. This is a plain TCP forward, so
+# TLS terminates on the Broker and the certificate you see is the Broker's.
+#
+# An HTTP reverse proxy would be the obvious alternative, but the Leostream
+# Gateway's /etc/httpd/conf.d/leo.conf declares its <Location> blocks outside
+# any <VirtualHost>, which makes them global. A new vhost would inherit the
+# /app/... handlers that the Broker's own UI also uses, and those requests would
+# be answered by the Gateway's mod_perl instead of the Broker.
+ADMIN_PORT='__ADMIN_PORT__'
+if [ -n "$ADMIN_PORT" ]; then
+    echo "--- forwarding ${ADMIN_PORT}/tcp to the Broker on 443 ---"
+    # Masquerade is required: without it the Broker would reply straight to the
+    # client through the NAT gateway and the client would drop the packet as
+    # asymmetric. It must be permanent, because a firewall-cmd --reload resets
+    # the runtime configuration to whatever is on disk.
+    firewall-cmd --permanent --add-masquerade
+    firewall-cmd --permanent --add-port="${ADMIN_PORT}/tcp"
+    firewall-cmd --permanent --add-forward-port=port="${ADMIN_PORT}":proto=tcp:toaddr='__BROKER_ADDRESS__':toport=443
+fi
+
 firewall-cmd --reload
 
 echo '--- enabling EPEL ---'
@@ -204,7 +234,8 @@ $script = $template.
     Replace('__OS_UPDATE__',      $updateCmd).
     Replace('__VM_NAME__',        $spec.Name).
     Replace('__INSTALLER_URI__',  $InstallerUri).
-    Replace('__BROKER_ADDRESS__', $BrokerAddress)
+    Replace('__BROKER_ADDRESS__', $BrokerAddress).
+    Replace('__ADMIN_PORT__',     $adminPort)
 
 # --- surviving a dropped connection -------------------------------------------
 # Invoke-AzVMRunCommand holds one HTTPS conversation with Azure open for the

@@ -29,6 +29,17 @@ locals {
     },
   ]
 
+  # The Gateway forwards this port straight to the Broker on 443, so the rule
+  # targets the subnet rather than terminating on the Gateway's web server.
+  broker_admin_nsg_rule = var.broker_admin_port == null ? [] : [
+    {
+      name        = "Allow-Broker-Admin-Inbound"
+      description = "Broker admin UI, forwarded by the Gateway to the Broker on 443"
+      priority    = 115
+      port        = tostring(var.broker_admin_port)
+    },
+  ]
+
   http_nsg_rule = var.http_port == null ? [] : [
     {
       name        = "Allow-HTTP-Inbound"
@@ -38,7 +49,7 @@ locals {
     },
   ]
 
-  nsg_rules = concat(local.base_nsg_rules, local.http_nsg_rule)
+  nsg_rules = concat(local.base_nsg_rules, local.broker_admin_nsg_rule, local.http_nsg_rule)
 }
 
 #region resource group ---------------------------------------------------------

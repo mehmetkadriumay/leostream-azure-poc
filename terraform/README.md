@@ -20,6 +20,7 @@ to recreate everything (see [Adopting an existing deployment](#adopting-an-exist
 | Virtual network | `vnet-leostream-poc` | `10.50.0.0/16` |
 | Subnet | `snet-leostream` | `10.50.1.0/24`, NSG and NAT associated |
 | Public IP | `pip-leo-gateway-01` | Standard, static, inbound |
+| NSG rule | `Allow-Broker-Admin-Inbound` | Port 8443, forwarded to the Broker; disable with `broker_admin_port = null` |
 | Network interfaces | `nic-leo-broker-01`, `nic-leo-gateway-01` | Static private IPs |
 | Virtual machine | `leo-broker-01` | RHEL 9, `10.50.1.10`, no public IP, system-assigned identity |
 | Virtual machine | `leo-gateway-01` | RHEL 9, `10.50.1.20`, public IP |
@@ -91,6 +92,7 @@ terraform output
 | Output | Use |
 | --- | --- |
 | `gateway_public_ip` | Inbound address of the Gateway |
+| `broker_admin_url` | Broker console in a browser, no tunnel needed |
 | `ssh_to_gateway` | Administrative session on the Gateway |
 | `ssh_to_broker` | Jump through the Gateway to the Broker |
 | `broker_admin_tunnel` | Tunnel, then browse `https://localhost:8443/` |
@@ -99,6 +101,20 @@ terraform output
 
 The Broker starts at the default credentials `admin` / `leo`. Change them at
 first sign-in.
+
+> [!WARNING]
+> `broker_admin_port` defaults to `8443`, which publishes the Broker's
+> administrator console on the Gateway's public IP so you can reach it without
+> an SSH tunnel. Combined with the default `allowed_client_cidrs` of
+> `0.0.0.0/0`, that puts the console on the open internet. Change the Broker
+> password immediately, narrow `allowed_client_cidrs`, or set
+> `broker_admin_port = null` to disable it.
+
+The Gateway publishes it with a firewalld TCP forward to the Broker on 443, so
+TLS terminates on the Broker and you will see the `CN=leo-broker-01`
+certificate. An HTTP reverse proxy is not used, because the Gateway's
+`leo.conf` declares its `<Location>` blocks globally and a new vhost would
+inherit the `/app/...` handlers the Broker's UI also needs.
 
 Validate the result with the existing PowerShell test script, which is
 deployment-method agnostic:
@@ -182,6 +198,8 @@ which deliberately keeps secret creation out of Terraform state.
 | `A resource with the ID ... already exists` | The deployment exists but is not in Terraform state. See [Adopting an existing deployment](#adopting-an-existing-deployment). |
 | `subscription_id is required` | Run `az login`, then `az account set --subscription <id>`, or set `ARM_SUBSCRIPTION_ID`. |
 | Run command reports success but Leostream is not serving | Run command reports the *execution*, not the install result. Read the output: `az vm run-command show --resource-group rg-leostream-poc --vm-name leo-broker-01 --name install-leostream-broker --instance-view` |
+| `broker_admin_url` times out while 443 works | Source address not in `allowed_client_cidrs`, or the forward is missing. Check `sudo firewall-cmd --list-forward-ports` on the Gateway. |
+| TLS fails on 8443 although TCP connects | `masquerade` is off, so the Broker answers you directly and the reply is dropped as asymmetric. `sudo firewall-cmd --permanent --add-masquerade; sudo firewall-cmd --reload` |
 | `Error: creating Resource Group: ... already exists` | Set `create_resource_group = false`. |
 
 To re-run an installer after changing a script, taint the run command:

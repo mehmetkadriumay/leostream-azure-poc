@@ -533,8 +533,34 @@ the Gateway's public IP changes.
 
 ### Step 4 — reach the Broker web UI
 
-The Broker's console is on port 443 of a private address, so forward a local port
-through the Gateway with `-L`:
+There are two ways in. If `Ports.BrokerAdmin` is set in `poc.config.psd1` (it
+defaults to `8443`), the Gateway already publishes the Broker's console on its
+public IP and you can skip the tunnel entirely:
+
+```
+https://<gateway-public-ip>:8443/
+```
+
+The Gateway forwards that port straight through to the Broker on 443 with a
+firewalld rule, so TLS terminates on the Broker and the certificate you see is
+`CN=leo-broker-01`, not the Gateway's.
+
+> [!WARNING]
+> This publishes the Leostream administrator console to whatever
+> `AllowedClientCidrs` permits, which defaults to the entire internet. **Change
+> the Broker's default `admin` / `leo` credentials immediately**, or set
+> `Ports.BrokerAdmin = $null` and use the tunnel below instead.
+
+An HTTP reverse proxy on the Gateway looks like the natural alternative, but the
+Gateway's `/etc/httpd/conf.d/leo.conf` declares its `<Location>` blocks outside
+any `<VirtualHost>`, making them global. A new vhost inherits the `/app/...`
+handlers the Broker's own UI uses, and those requests get answered by the
+Gateway's mod_perl instead of the Broker. The TCP forward avoids that entirely.
+
+#### Or tunnel over SSH
+
+With `Ports.BrokerAdmin = $null`, or if you would rather not expose the console,
+forward a local port through the Gateway with `-L`:
 
 ```powershell
 ssh -i $key -L 8443:10.50.1.10:443 $user@$gw
@@ -566,7 +592,10 @@ already taken.
 | Key works on one VM but not the other | The VMs were deployed at different times, or from different clones of this repo, with different `SshPublicKeyPath` values | Compare both VMs with the snippet below. Changing the config does **not** re-key an existing VM |
 | `Identity file ... not accessible` with a mangled path like `/home/leoadmin.sshid_rsa` | Running in bash inside a VM, not PowerShell. Bash expanded `$HOME` to the Linux home and ate the `\` characters | `exit` back to PowerShell |
 | Step 2 works but step 3 hangs | Broker VM is stopped or still booting | `Get-AzVM -ResourceGroupName $rg -Name leo-broker-01 -Status` |
-| Browser shows `ERR_CONNECTION_REFUSED` on localhost:8443 | Tunnel window closed, or the Broker software is not installed yet | Reopen the tunnel; check `systemctl status leostream` on the Broker |
+| Browser shows `ERR_CONNECTION_REFUSED` on localhost:8443 | Tunnel window closed, or the Broker software is not installed yet | Reopen the tunnel; check `systemctl status leostream-broker` on the Broker |
+| `https://<gateway-ip>:8443/` times out, but 443 works | Your source address is not in `AllowedClientCidrs`, or the forward is missing | Check the NSG rule `Allow-Broker-Admin-Inbound`, then on the Gateway run `sudo firewall-cmd --list-forward-ports` |
+| TLS handshake fails on 8443 while TCP connects | `masquerade` is off, so the Broker replies directly to you and the packet is dropped as asymmetric | `sudo firewall-cmd --permanent --add-masquerade; sudo firewall-cmd --reload` |
+| Narrowing `AllowedClientCidrs` to "my IP" locks you out | Corporate networks often egress to Azure from a rotating pool, so the address `api.ipify.org` reports is not the one Azure sees | Capture the real source on the Gateway: `sudo tcpdump -nni eth0 'tcp port 443 and tcp[tcpflags] & tcp-syn != 0'` |
 | `WARNING: UNPROTECTED PRIVATE KEY FILE` | Key file permissions too open | `icacls $key /inheritance:r /grant:r "$($env:USERNAME):(R)"` |
 
 ### Checking which key is actually deployed

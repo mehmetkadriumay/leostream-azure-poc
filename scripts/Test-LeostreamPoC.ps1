@@ -134,7 +134,11 @@ else {
 # --- NSG rules ----------------------------------------------------------------
 $nsg = Get-AzNetworkSecurityGroup -ResourceGroupName $rgName -Name $config.Network.NsgName -ErrorAction SilentlyContinue
 if ($nsg) {
-    foreach ($port in @("$($config.Ports.Https)", "$($config.Ports.Ssh)")) {
+    $expectedPorts = @("$($config.Ports.Https)", "$($config.Ports.Ssh)")
+    if ($config.Ports.Contains('BrokerAdmin') -and $config.Ports.BrokerAdmin) {
+        $expectedPorts += "$($config.Ports.BrokerAdmin)"
+    }
+    foreach ($port in $expectedPorts) {
         $rule = @($nsg.SecurityRules | Where-Object {
             $_.Direction -eq 'Inbound' -and $_.Access -eq 'Allow' -and ($_.DestinationPortRange -contains $port)
         })
@@ -338,6 +342,22 @@ if ($pip -and $pip.IpAddress -and $pip.IpAddress -ne 'Not Assigned') {
         }
         else {
             Add-Result -Area 'Service' -Check 'Gateway TCP/22 reachable' -Status Warn -Detail 'no response - your IP is probably not in AllowedClientCidrs'
+        }
+
+        # The Gateway forwards this port to the Broker on 443, so a successful
+        # TLS handshake here proves the NSG rule, the firewalld forward and the
+        # Broker's web server are all working.
+        if ($config.Ports.Contains('BrokerAdmin') -and $config.Ports.BrokerAdmin) {
+            $adminPort = $config.Ports.BrokerAdmin
+            $admin = Test-NetConnection -ComputerName $pip.IpAddress -Port $adminPort -WarningAction SilentlyContinue
+            if ($admin.TcpTestSucceeded) {
+                Add-Result -Area 'Service' -Check "Broker admin UI published on TCP/$adminPort" -Status Pass `
+                    -Detail "https://$($pip.IpAddress):$adminPort/ - console is internet-facing, do not leave it on default credentials"
+            }
+            else {
+                Add-Result -Area 'Service' -Check "Broker admin UI published on TCP/$adminPort" -Status Warn `
+                    -Detail 'no response - check the Gateway firewalld forward-port rule, or that your IP is in AllowedClientCidrs'
+            }
         }
     }
 }

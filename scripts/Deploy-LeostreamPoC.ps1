@@ -183,6 +183,20 @@ $rules = @(
         -DestinationAddressPrefix $net.SubnetPrefix -DestinationPortRange '22'
 )
 
+# Publishes the Broker's administrator interface on the Gateway's public IP so
+# it can be reached in a browser without an SSH tunnel. The Gateway forwards the
+# port straight to the Broker on 443, so this rule targets the subnet and the
+# traffic is never terminated by the Gateway's own web server.
+if ($config.Ports.Contains('BrokerAdmin') -and $config.Ports.BrokerAdmin) {
+    Write-Warning "Ports.BrokerAdmin is set - the Broker administrator console will be published on port $($config.Ports.BrokerAdmin). Change the default 'admin' / 'leo' credentials, and narrow AllowedClientCidrs."
+    $rules += New-AzNetworkSecurityRuleConfig `
+        -Name 'Allow-Broker-Admin-Inbound' `
+        -Description 'Broker admin UI, forwarded by the Gateway to the Broker on 443' `
+        -Priority 115 -Direction Inbound -Access Allow -Protocol Tcp `
+        -SourceAddressPrefix $allowedClients -SourcePortRange '*' `
+        -DestinationAddressPrefix $net.SubnetPrefix -DestinationPortRange "$($config.Ports.BrokerAdmin)"
+}
+
 # Leostream also documents inbound 80, which serves the HTTP-to-HTTPS redirect
 # on the admin interface and lets certbot answer an ACME http-01 challenge when
 # you replace the self-signed certificate. Neither is needed for this PoC - the
